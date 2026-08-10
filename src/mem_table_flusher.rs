@@ -70,7 +70,7 @@ impl MemTableFlusher {
 
         for (key, value) in mem_table.iter() {
             writer.write_all(&(key.len() as u32).to_le_bytes()).await?; // Key length
-            writer.write_all(&key).await?; // Key
+            writer.write_all(key).await?; // Key
 
             match value {
                 DbValue::Value(bytes) => {
@@ -78,7 +78,7 @@ impl MemTableFlusher {
                     writer
                         .write_all(&(bytes.len() as u32).to_le_bytes())
                         .await?; // Value length in bytes
-                    writer.write_all(&bytes).await?; // Value
+                    writer.write_all(bytes).await?; // Value
                 }
                 DbValue::Tombstone => {
                     writer.write_all(&[1u8]).await?;

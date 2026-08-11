@@ -1,0 +1,218 @@
+use crate::le_reader::LeReader;
+use crate::ss_table_metadata::{SsTableId, SsTableLevel, SsTableMetadata};
+use glommio::GlommioError;
+use glommio::io::{BufferedFile, Directory};
+use std::collections::{BTreeSet, HashMap};
+use std::io::ErrorKind;
+use std::path::Path;
+use std::rc::Rc;
+
+enum ManifestEntry {
+    AddSsTable(Rc<SsTableMetadata>), // 0
+    RemoveSsTable(SsTableId),        // 1
+}
+
+impl ManifestEntry {
+    fn encode(&self, buffer: &mut Vec<u8>) {
+        match &self {
+            ManifestEntry::AddSsTable(metadata) => {
+                buffer.push(0u8); // Entry type
+                buffer.extend_from_slice(&metadata.id.to_le_bytes()); // Id
+                buffer.extend_from_slice(&metadata.entry_count.to_le_bytes()); // Entry count
+                buffer.extend_from_slice(&metadata.level.to_le_bytes()); // Level
+
+                buffer.extend_from_slice(&(metadata.min_key.len() as u32).to_le_bytes()); // Min key len
+                buffer.extend_from_slice(&metadata.min_key); // Min key
+
+                buffer.extend_from_slice(&(metadata.max_key.len() as u32).to_le_bytes()); // Max key len
+                buffer.extend_from_slice(&metadata.max_key); // Max key
+            }
+            ManifestEntry::RemoveSsTable(id) => {
+                buffer.push(1u8); // Entry type
+                buffer.extend_from_slice(&id.to_le_bytes()); // Id
+            }
+        }
+    }
+
+    fn decode(buffer: &[u8]) -> Option<(ManifestEntry, u32)> {
+        let mut offset: usize = 0;
+
+        let entry_type: u8 = buffer[0];
+        offset += 1;
+
+        match entry_type {
+            0u8 => {
+                let id = LeReader::read_u32_le(buffer, offset);
+                offset += size_of::<u32>();
+
+                let entry_count = LeReader::read_u32_le(buffer, offset);
+                offset += size_of::<u32>();
+
+                let level = LeReader::read_u16_le(buffer, offset);
+                offset += size_of::<u16>();
+
+                let min_key_len = LeReader::read_u32_le(buffer, offset);
+                offset += size_of::<u32>();
+
+                let min_key: &[u8] = &buffer[offset..offset + min_key_len as usize];
+                offset += min_key_len as usize;
+
+                let max_key_len = LeReader::read_u32_le(buffer, offset);
+                offset += size_of::<u32>();
+
+                let max_key: &[u8] = &buffer[offset..offset + max_key_len as usize];
+                offset += max_key_len as usize;
+
+                Some((
+                    ManifestEntry::AddSsTable(Rc::new(SsTableMetadata {
+                        id,
+                        entry_count,
+                        level,
+                        min_key: min_key.to_vec(),
+                        max_key: max_key.to_vec(),
+                    })),
+                    offset as u32,
+                ))
+            }
+            1u8 => {
+                let id = LeReader::read_u32_le(buffer, offset);
+                offset += size_of::<u32>();
+                Some((ManifestEntry::RemoveSsTable(id), offset as u32))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub struct Manifest {
+    cpu_shard_id: u32,
+    by_id: HashMap<SsTableId, Rc<SsTableMetadata>>,
+    by_level: HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>>,
+    file: BufferedFile,
+    write_pos: u64,
+    entry_serialization_buffer: Vec<u8>,
+}
+
+impl Manifest {
+    const FILE_NAME: &'static str = "MANIFEST";
+
+    pub async fn open_or_create(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
+        match Self::open(dir, cpu_shard_id).await {
+            Ok(manifest) => Ok(manifest),
+            Err(GlommioError::IoError(e)) if e.kind() == ErrorKind::NotFound => {
+                Self::create(dir, cpu_shard_id).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn add_ss_table(
+        &mut self,
+        metadata: SsTableMetadata,
+    ) -> Result<(), GlommioError<()>> {
+        let rc = Rc::new(metadata);
+
+        self.append(ManifestEntry::AddSsTable(rc.clone())).await?;
+        Self::memory_add_ss_table(&mut self.by_id, &mut self.by_level, rc);
+
+        Ok(())
+    }
+
+    async fn open(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
+        let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
+        let file = BufferedFile::open(&path).await?;
+        let file_size = file.file_size().await? as usize;
+        let result = file.read_at(0, file_size).await?;
+
+        let mut by_id: HashMap<SsTableId, Rc<SsTableMetadata>> = HashMap::new();
+        let mut by_level: HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>> = HashMap::new();
+        let mut pos = 0usize;
+
+        while let Some((entry, consumed)) = ManifestEntry::decode(&result[pos..]) {
+            match entry {
+                ManifestEntry::AddSsTable(metadata) => {
+                    Self::memory_add_ss_table(&mut by_id, &mut by_level, metadata)
+                }
+                ManifestEntry::RemoveSsTable(id) => {
+                    Self::memory_remove_ss_table(&mut by_id, &mut by_level, id)
+                }
+            }
+
+            pos += consumed as usize;
+        }
+
+        Ok(Self {
+            cpu_shard_id,
+            by_id,
+            by_level,
+            file,
+            write_pos: pos as u64,
+            entry_serialization_buffer: Vec::new(),
+        })
+    }
+
+    async fn create(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
+        let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
+
+        // DURABILITY: Flush to disk
+        let file = BufferedFile::create(&path).await?;
+        file.fdatasync().await?;
+
+        // DURABILITY: Sync dir metadata
+        let parent = Directory::open(&dir).await?;
+        parent.sync().await?;
+
+        Ok(Self {
+            cpu_shard_id,
+            by_id: HashMap::new(),
+            by_level: HashMap::new(),
+            file,
+            write_pos: 0,
+            entry_serialization_buffer: Vec::new(),
+        })
+    }
+
+    async fn append(&mut self, entry: ManifestEntry) -> Result<(), GlommioError<()>> {
+        let mut buffer = std::mem::take(&mut self.entry_serialization_buffer);
+        buffer.clear();
+        entry.encode(&mut buffer);
+
+        let next_capacity = buffer.capacity();
+        let len = buffer.len() as u64;
+
+        self.file.write_at(buffer, self.write_pos).await?; // buffer is gone :/
+        self.write_pos += len;
+        self.entry_serialization_buffer = Vec::with_capacity(next_capacity);
+
+        // DURABILITY: flush to disk
+        self.file.fdatasync().await?;
+
+        Ok(())
+    }
+
+    fn memory_add_ss_table(
+        by_id: &mut HashMap<SsTableId, Rc<SsTableMetadata>>,
+        by_level: &mut HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>>,
+        metadata: Rc<SsTableMetadata>,
+    ) {
+        let level = metadata.level;
+
+        by_id.insert(metadata.id, Rc::clone(&metadata));
+        by_level
+            .entry(level)
+            .or_insert_with(BTreeSet::new)
+            .insert(metadata);
+    }
+
+    fn memory_remove_ss_table(
+        by_id: &mut HashMap<SsTableId, Rc<SsTableMetadata>>,
+        by_level: &mut HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>>,
+        id: SsTableId,
+    ) {
+        if let Some(table) = by_id.remove(&id) {
+            if let Some(set) = by_level.get_mut(&table.level) {
+                set.remove(&table);
+            }
+        }
+    }
+}

@@ -1,4 +1,5 @@
 use crate::entry::{DbEntry, DbValue};
+use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::ss_table_metadata::{SsTableId, SsTableMetadata};
 use crate::storage_config::StorageConfig;
@@ -15,6 +16,7 @@ pub struct MemTableFlusher {
     storage_config: Arc<StorageConfig>,
     dir: PathBuf,
     parent: Directory,
+    manifest: Manifest,
 }
 
 impl MemTableFlusher {
@@ -22,6 +24,7 @@ impl MemTableFlusher {
         dir: PathBuf,
         cpu_shard_id: u32,
         storage_config: Arc<StorageConfig>,
+        manifest: Manifest,
     ) -> Result<MemTableFlusher, GlommioError<()>> {
         let parent = Directory::open(&dir).await?;
         Ok(Self {
@@ -30,6 +33,7 @@ impl MemTableFlusher {
             storage_config,
             dir,
             parent,
+            manifest,
         })
     }
 
@@ -47,10 +51,7 @@ impl MemTableFlusher {
             }
     }
 
-    pub async fn flush<MT: MemTable>(
-        &self,
-        mem_table: MT,
-    ) -> Result<SsTableMetadata, GlommioError<()>> {
+    pub async fn flush<MT: MemTable>(&mut self, mem_table: MT) -> Result<(), GlommioError<()>> {
         // ATOMICITY: we're not flushing to temp file, but we won't list this ss table in manifest unless completely saved
         let id = self.next_id();
         let path = self
@@ -97,13 +98,18 @@ impl MemTableFlusher {
         // discoverable on disk.
         self.parent.sync().await?;
 
-        Ok(SsTableMetadata {
-            id,
-            entry_count: mem_table.entry_count(),
-            level: 0,
-            min_key: mem_table.min_key().clone(),
-            max_key: mem_table.max_key().clone(),
-        })
+        // AFTER durable save, make ss table reachable
+        self.manifest
+            .add_ss_table(SsTableMetadata {
+                id,
+                entry_count: mem_table.entry_count(),
+                level: 0,
+                min_key: mem_table.min_key().clone(),
+                max_key: mem_table.max_key().clone(),
+            })
+            .await?;
+
+        Ok(())
     }
 
     fn next_id(&self) -> SsTableId {

@@ -1,5 +1,6 @@
 mod entry;
 mod manifest_internal;
+pub mod snapshot;
 
 use crate::manifest::manifest_internal::ManifestInternal;
 use crate::ss_table_metadata::{SsTableId, SsTableMetadata};
@@ -77,7 +78,7 @@ impl Manifest {
     }
 
     pub async fn add_ss_table(&self, metadata: SsTableMetadata) -> Result<(), GlommioError<()>> {
-        let (reply_tx, mut reply_rx) = local_channel::new_bounded(1);
+        let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
             .send(ManifestCommand::AddSsTable {
                 metadata,
@@ -94,7 +95,7 @@ impl Manifest {
     }
 
     pub async fn remove_ss_table(&self, id: SsTableId) -> Result<(), GlommioError<()>> {
-        let (reply_tx, mut reply_rx) = local_channel::new_bounded(1);
+        let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
             .send(ManifestCommand::RemoveSsTable {
                 id,

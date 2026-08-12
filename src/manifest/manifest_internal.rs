@@ -1,4 +1,5 @@
 use crate::manifest::entry::ManifestEntry;
+use crate::manifest::snapshot::ManifestSnapshot;
 use crate::ss_table_metadata::{SsTableId, SsTableLevel, SsTableMetadata};
 use glommio::GlommioError;
 use glommio::io::{BufferedFile, Directory};
@@ -10,7 +11,13 @@ use std::rc::Rc;
 pub(super) struct ManifestInternal {
     cpu_shard_id: u32,
     by_id: HashMap<SsTableId, Rc<SsTableMetadata>>,
-    by_level: HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>>,
+    // Although it's not intuitive, due to use of snapshot the BTreeSet must be wrapped by Rc for best performance.
+    // Let's say that N is amount of copies performed for snapshots (without Rc over BTreeSet, quite expensive, but mutating costs nothing).
+    // Let's say X = number of copies (single, mutated level copy, NOT WHOLE BTreeSet!) performed for inserts and Y is analogical, but for removals.
+    // Because these copies (for inserts/removals, mutating) are going to be done only when necessary (old snapshot is referenced somewhere)
+    // We can conclude that X + Y <= N * (number of levels).
+    // So wrapping it in Rc<> always procudes better or at least the same performance as not doing it.
+    by_level: HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>>,
     file: BufferedFile,
     write_pos: u64,
     entry_serialization_buffer: Vec<u8>,
@@ -51,6 +58,10 @@ impl ManifestInternal {
         Ok(())
     }
 
+    pub(super) fn snapshot(&self) -> ManifestSnapshot {
+        ManifestSnapshot::new(self.by_level.clone())
+    }
+
     async fn open(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
         let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
         let file = BufferedFile::open(&path).await?;
@@ -58,7 +69,7 @@ impl ManifestInternal {
         let result = file.read_at(0, file_size).await?;
 
         let mut by_id: HashMap<SsTableId, Rc<SsTableMetadata>> = HashMap::new();
-        let mut by_level: HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>> = HashMap::new();
+        let mut by_level: HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>> = HashMap::new();
         let mut pos = 0usize;
 
         while let Some((entry, consumed)) = ManifestEntry::decode(&result[pos..]) {
@@ -126,25 +137,27 @@ impl ManifestInternal {
 
     fn memory_add_ss_table(
         by_id: &mut HashMap<SsTableId, Rc<SsTableMetadata>>,
-        by_level: &mut HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>>,
+        by_level: &mut HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>>,
         metadata: Rc<SsTableMetadata>,
     ) {
         let level = metadata.level;
 
         by_id.insert(metadata.id, Rc::clone(&metadata));
-        by_level
+        let set_rc = by_level
             .entry(level)
-            .or_insert_with(BTreeSet::new)
-            .insert(metadata);
+            .or_insert_with(|| Rc::new(BTreeSet::new()));
+
+        Rc::make_mut(set_rc).insert(metadata);
     }
 
     fn memory_remove_ss_table(
         by_id: &mut HashMap<SsTableId, Rc<SsTableMetadata>>,
-        by_level: &mut HashMap<SsTableLevel, BTreeSet<Rc<SsTableMetadata>>>,
+        by_level: &mut HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>>,
         id: SsTableId,
     ) {
         if let Some(table) = by_id.remove(&id) {
-            if let Some(set) = by_level.get_mut(&table.level) {
+            if let Some(set_rc) = by_level.get_mut(&table.level) {
+                let set = Rc::make_mut(set_rc);
                 set.remove(&table);
             }
         }

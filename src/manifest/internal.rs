@@ -1,6 +1,6 @@
 use crate::manifest::entry::ManifestEntry;
 use crate::manifest::snapshot::ManifestSnapshot;
-use crate::ss_table_metadata::{SsTableId, SsTableLevel, SsTableMetadata};
+use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
 use glommio::GlommioError;
 use glommio::io::{BufferedFile, Directory};
 use std::collections::{BTreeSet, HashMap};

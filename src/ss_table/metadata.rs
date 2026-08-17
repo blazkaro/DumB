@@ -1,9 +1,10 @@
-use crate::entry::DbKey;
+use crate::db_entry::DbKey;
 use std::cmp::Ordering;
 
 pub type SsTableId = u32;
 pub type SsTableLevel = u16;
 
+#[derive(Default)]
 pub struct SsTableMetadata {
     pub id: SsTableId,
     pub entry_count: u32,
@@ -32,5 +33,14 @@ impl Ord for SsTableMetadata {
             .cmp(&other.min_key)
             .then_with(|| self.max_key.cmp(&other.max_key))
             .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl SsTableMetadata {
+    pub fn min_key_bound(min_key: DbKey) -> Self {
+        Self {
+            min_key,
+            ..Default::default()
+        }
     }
 }

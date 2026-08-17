@@ -1,22 +1,22 @@
-use crate::entry::{DbEntry, DbKey, DbValue};
-use crate::mem_table::{MemTable, MemTableError};
-use crate::mem_table_flusher::MemTableFlusher;
+use crate::db_entry::{DbEntry, DbKey, DbValue};
+use crate::mem_table::mem_table::{MemTable, MemTableError};
+use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 pub struct BTreeMemTable {
     map: BTreeMap<DbKey, DbValue>,
     bytes_size: u32,
-    config: Arc<StorageConfig>,
+    storage_config: Rc<StorageConfig>,
 }
 
 impl BTreeMemTable {
-    pub fn new(config: Arc<StorageConfig>) -> Self {
+    pub fn new(storage_config: Rc<StorageConfig>) -> Self {
         Self {
             map: BTreeMap::new(),
             bytes_size: 0,
-            config,
+            storage_config,
         }
     }
 }
@@ -27,8 +27,8 @@ impl MemTable for BTreeMemTable {
     }
 
     fn set(&mut self, entry: DbEntry) -> Result<(), MemTableError> {
-        let entry_bytes_count = MemTableFlusher::db_entry_bytes_size(&entry);
-        if self.bytes_size + entry_bytes_count > self.config.memory_table_bytes_max_size {
+        let entry_bytes_count = SsTableWriter::db_entry_bytes_size(&entry);
+        if self.bytes_size + entry_bytes_count > self.storage_config.memory_table_bytes_max_size {
             return Err(MemTableError::SizeExceeded);
         }
 

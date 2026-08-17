@@ -1,4 +1,4 @@
-use crate::ss_table_metadata::{SsTableLevel, SsTableMetadata};
+use crate::ss_table::metadata::{SsTableLevel, SsTableMetadata};
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
@@ -11,13 +11,11 @@ impl ManifestSnapshot {
         Self { ss_tables }
     }
 
-    pub fn get_level(
-        &self,
-        level: SsTableLevel,
-    ) -> Option<impl Iterator<Item = &Rc<SsTableMetadata>>> {
-        match self.ss_tables.get(&level) {
-            Some(set) => Some(set.iter()),
-            None => None,
-        }
+    pub fn get_level(&self, level: SsTableLevel) -> Option<Rc<BTreeSet<Rc<SsTableMetadata>>>> {
+        self.ss_tables.get(&level).cloned() // O(1), Rc clone
+    }
+
+    pub fn table_count_at_level(&self, level: SsTableLevel) -> usize {
+        self.ss_tables.get(&level).map(|set| set.len()).unwrap_or(0)
     }
 }

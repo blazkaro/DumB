@@ -1,5 +1,5 @@
 use crate::le_reader::LeReader;
-use crate::ss_table_metadata::{SsTableId, SsTableMetadata};
+use crate::ss_table::metadata::{SsTableId, SsTableMetadata};
 use std::rc::Rc;
 
 pub(super) enum ManifestEntry {

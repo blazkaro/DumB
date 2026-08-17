@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 futures = "0.3.33"
 glommio = "0.9.0"
+uuid = { version = "1.24.1", features = ["v4"] }

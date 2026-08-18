@@ -58,6 +58,36 @@ impl ManifestInternal {
         Ok(())
     }
 
+    // Compaction isn't just set of add and remove - they all need to be done in batch, all or none at once (fulfill ACID
+    // That is why this method exists
+    pub(super) async fn apply_compaction(
+        &mut self,
+        new_ss_tables: Vec<SsTableMetadata>,
+        old_ss_table_ids: Vec<SsTableId>,
+    ) -> Result<(), GlommioError<()>> {
+        let to_add: Vec<Rc<SsTableMetadata>> = new_ss_tables.into_iter().map(Rc::new).collect();
+
+        let entries = old_ss_table_ids
+            .iter()
+            .map(|&id| ManifestEntry::RemoveSsTable(id))
+            .chain(to_add.iter().cloned().map(ManifestEntry::AddSsTable))
+            .collect();
+
+        self.append_batch(entries).await?;
+
+        // ATOMICITY: No await between - should not cause invalid state (and valid state is also enforced by using snapshot in manifest handler)
+        // DURABILITY: Processed AFTER durable append batch
+        for id in old_ss_table_ids {
+            Self::memory_remove_ss_table(&mut self.by_id, &mut self.by_level, id);
+        }
+
+        for metadata in to_add {
+            Self::memory_add_ss_table(&mut self.by_id, &mut self.by_level, metadata);
+        }
+
+        Ok(())
+    }
+
     pub(super) fn snapshot(&self) -> ManifestSnapshot {
         ManifestSnapshot::new(self.by_level.clone())
     }
@@ -123,13 +153,33 @@ impl ManifestInternal {
 
         let next_capacity = buffer.capacity();
         let len = buffer.len() as u64;
-
         let pos = self.write_pos;
+
         self.write_pos += len;
         self.entry_serialization_buffer = Vec::with_capacity(next_capacity);
         self.file.write_at(buffer, pos).await?; // buffer is gone
 
         // DURABILITY: flush to disk
+        self.file.fdatasync().await?;
+
+        Ok(())
+    }
+
+    async fn append_batch(&mut self, entries: Vec<ManifestEntry>) -> Result<(), GlommioError<()>> {
+        let mut buffer =
+            Vec::with_capacity(entries.len() * self.entry_serialization_buffer.capacity());
+
+        for entry in &entries {
+            entry.encode(&mut buffer);
+        }
+
+        let len = buffer.len() as u64;
+        let pos = self.write_pos;
+
+        self.write_pos += len;
+        self.file.write_at(buffer, pos).await?;
+
+        // ATOMICITY, DURABILITY: flush batch at once
         self.file.fdatasync().await?;
 
         Ok(())

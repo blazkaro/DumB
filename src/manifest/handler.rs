@@ -20,6 +20,11 @@ pub enum ManifestCommand {
         id: SsTableId,
         reply: ManifestReply,
     },
+    Compaction {
+        new_ss_tables: Vec<SsTableMetadata>,
+        old_ss_table_ids: Vec<SsTableId>,
+        reply: ManifestReply,
+    },
 }
 
 #[derive(Clone)]
@@ -93,6 +98,20 @@ impl ManifestHandler {
                     }
                     let _ = reply.try_send(result);
                 }
+                ManifestCommand::Compaction {
+                    new_ss_tables,
+                    old_ss_table_ids,
+                    reply,
+                } => {
+                    let result = manifest
+                        .apply_compaction(new_ss_tables, old_ss_table_ids)
+                        .await;
+
+                    if result.is_ok() {
+                        *current_snapshot.borrow_mut() = Rc::new(manifest.snapshot());
+                    }
+                    let _ = reply.try_send(result);
+                }
             }
         }
     }
@@ -119,6 +138,28 @@ impl ManifestHandler {
         self.sender
             .send(ManifestCommand::RemoveSsTable {
                 id,
+                reply: reply_tx,
+            })
+            .await
+            .expect("manifest actor task is no longer running");
+
+        reply_rx
+            .stream()
+            .next()
+            .await
+            .expect("manifest actor dropped without responding")
+    }
+
+    pub async fn apply_compaction(
+        &self,
+        new_ss_tables: Vec<SsTableMetadata>,
+        old_ss_table_ids: Vec<SsTableId>,
+    ) -> Result<(), GlommioError<()>> {
+        let (reply_tx, reply_rx) = local_channel::new_bounded(1);
+        self.sender
+            .send(ManifestCommand::Compaction {
+                new_ss_tables,
+                old_ss_table_ids,
                 reply: reply_tx,
             })
             .await

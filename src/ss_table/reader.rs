@@ -65,7 +65,7 @@ impl SsTableReader {
         Ok(DbEntry { key, value })
     }
 
-    pub async fn get_level(&self) -> SsTableLevel {
+    pub fn get_level(&self) -> SsTableLevel {
         self.level
     }
 

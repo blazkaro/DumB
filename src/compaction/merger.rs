@@ -177,6 +177,7 @@ impl SsTableMerger {
                 new_ss_tables.push(SsTableMetadata {
                     id: current_id,
                     entry_count,
+                    size_bytes: writer.as_ref().unwrap().bytes_written(),
                     level: target_level,
                     min_key: min_key.clone(),
                     max_key: top.db_entry.key.clone(), // last item processed in this ss table, also valid for duplicated key

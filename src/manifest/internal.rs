@@ -18,6 +18,7 @@ pub(super) struct ManifestInternal {
     // We can conclude that X + Y <= N * (number of levels).
     // So wrapping it in Rc<> always procudes better or at least the same performance as not doing it.
     by_level: HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>>,
+    level_size_bytes: HashMap<SsTableLevel, u64>,
     file: BufferedFile,
     write_pos: u64,
     entry_serialization_buffer: Vec<u8>,
@@ -46,14 +47,24 @@ impl ManifestInternal {
         let rc = Rc::new(metadata);
 
         self.append(ManifestEntry::AddSsTable(rc.clone())).await?;
-        Self::memory_add_ss_table(&mut self.by_id, &mut self.by_level, rc);
+        Self::memory_add_ss_table(
+            &mut self.by_id,
+            &mut self.by_level,
+            &mut self.level_size_bytes,
+            rc,
+        );
 
         Ok(())
     }
 
     pub(super) async fn remove_ss_table(&mut self, id: SsTableId) -> Result<(), GlommioError<()>> {
         self.append(ManifestEntry::RemoveSsTable(id)).await?;
-        Self::memory_remove_ss_table(&mut self.by_id, &mut self.by_level, id);
+        Self::memory_remove_ss_table(
+            &mut self.by_id,
+            &mut self.by_level,
+            &mut self.level_size_bytes,
+            id,
+        );
 
         Ok(())
     }
@@ -78,18 +89,28 @@ impl ManifestInternal {
         // ATOMICITY: No await between - should not cause invalid state (and valid state is also enforced by using snapshot in manifest handler)
         // DURABILITY: Processed AFTER durable append batch
         for id in old_ss_table_ids {
-            Self::memory_remove_ss_table(&mut self.by_id, &mut self.by_level, id);
+            Self::memory_remove_ss_table(
+                &mut self.by_id,
+                &mut self.by_level,
+                &mut self.level_size_bytes,
+                id,
+            );
         }
 
         for metadata in to_add {
-            Self::memory_add_ss_table(&mut self.by_id, &mut self.by_level, metadata);
+            Self::memory_add_ss_table(
+                &mut self.by_id,
+                &mut self.by_level,
+                &mut self.level_size_bytes,
+                metadata,
+            );
         }
 
         Ok(())
     }
 
     pub(super) fn snapshot(&self) -> ManifestSnapshot {
-        ManifestSnapshot::new(self.by_level.clone())
+        ManifestSnapshot::new(self.by_level.clone(), self.level_size_bytes.clone())
     }
 
     async fn open(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
@@ -100,16 +121,23 @@ impl ManifestInternal {
 
         let mut by_id: HashMap<SsTableId, Rc<SsTableMetadata>> = HashMap::new();
         let mut by_level: HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>> = HashMap::new();
+        let mut level_size_bytes: HashMap<SsTableLevel, u64> = HashMap::new();
         let mut pos = 0usize;
 
         while let Some((entry, consumed)) = ManifestEntry::decode(&result[pos..]) {
             match entry {
-                ManifestEntry::AddSsTable(metadata) => {
-                    Self::memory_add_ss_table(&mut by_id, &mut by_level, metadata)
-                }
-                ManifestEntry::RemoveSsTable(id) => {
-                    Self::memory_remove_ss_table(&mut by_id, &mut by_level, id)
-                }
+                ManifestEntry::AddSsTable(metadata) => Self::memory_add_ss_table(
+                    &mut by_id,
+                    &mut by_level,
+                    &mut level_size_bytes,
+                    metadata,
+                ),
+                ManifestEntry::RemoveSsTable(id) => Self::memory_remove_ss_table(
+                    &mut by_id,
+                    &mut by_level,
+                    &mut level_size_bytes,
+                    id,
+                ),
             }
 
             pos += consumed as usize;
@@ -119,6 +147,7 @@ impl ManifestInternal {
             cpu_shard_id,
             by_id,
             by_level,
+            level_size_bytes,
             file,
             write_pos: pos as u64,
             entry_serialization_buffer: Vec::new(),
@@ -140,6 +169,7 @@ impl ManifestInternal {
             cpu_shard_id,
             by_id: HashMap::new(),
             by_level: HashMap::new(),
+            level_size_bytes: HashMap::new(),
             file,
             write_pos: 0,
             entry_serialization_buffer: Vec::new(),
@@ -188,6 +218,7 @@ impl ManifestInternal {
     fn memory_add_ss_table(
         by_id: &mut HashMap<SsTableId, Rc<SsTableMetadata>>,
         by_level: &mut HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>>,
+        level_size: &mut HashMap<SsTableLevel, u64>,
         metadata: Rc<SsTableMetadata>,
     ) {
         let level = metadata.level;
@@ -197,18 +228,21 @@ impl ManifestInternal {
             .entry(level)
             .or_insert_with(|| Rc::new(BTreeSet::new()));
 
+        *level_size.entry(level).or_insert(0) += metadata.size_bytes;
         Rc::make_mut(set_rc).insert(metadata);
     }
 
     fn memory_remove_ss_table(
         by_id: &mut HashMap<SsTableId, Rc<SsTableMetadata>>,
         by_level: &mut HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>>,
+        level_size: &mut HashMap<SsTableLevel, u64>,
         id: SsTableId,
     ) {
         if let Some(table) = by_id.remove(&id) {
             if let Some(set_rc) = by_level.get_mut(&table.level) {
                 let set = Rc::make_mut(set_rc);
                 set.remove(&table);
+                *level_size.get_mut(&table.level).unwrap() -= table.size_bytes;
             }
         }
     }

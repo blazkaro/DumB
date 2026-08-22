@@ -14,6 +14,7 @@ impl ManifestEntry {
                 buffer.push(0u8); // Entry type
                 buffer.extend_from_slice(&metadata.id.to_le_bytes()); // Id
                 buffer.extend_from_slice(&metadata.entry_count.to_le_bytes()); // Entry count
+                buffer.extend_from_slice(&metadata.size_bytes.to_le_bytes()); // Size (bytes count)
                 buffer.extend_from_slice(&metadata.level.to_le_bytes()); // Level
 
                 buffer.extend_from_slice(&(metadata.min_key.len() as u32).to_le_bytes()); // Min key len
@@ -43,6 +44,9 @@ impl ManifestEntry {
                 let entry_count = LeReader::read_u32_le(buffer, offset);
                 offset += size_of::<u32>();
 
+                let size_bytes = LeReader::read_u64_le(buffer, offset);
+                offset += size_of::<u64>();
+
                 let level = LeReader::read_u16_le(buffer, offset);
                 offset += size_of::<u16>();
 
@@ -62,6 +66,7 @@ impl ManifestEntry {
                     ManifestEntry::AddSsTable(Rc::new(SsTableMetadata {
                         id,
                         entry_count,
+                        size_bytes,
                         level,
                         min_key: min_key.to_vec(),
                         max_key: max_key.to_vec(),

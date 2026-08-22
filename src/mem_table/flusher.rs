@@ -55,6 +55,8 @@ impl MemTableFlusher {
             writer.write_entry(key, value).await?;
         }
 
+        let bytes_written = writer.bytes_written();
+
         // DURABILITY: flush to disk then update dir metadata
         writer.finish().await?;
         self.parent.sync().await?;
@@ -64,6 +66,7 @@ impl MemTableFlusher {
             .add_ss_table(SsTableMetadata {
                 id,
                 entry_count: mem_table.entry_count(),
+                size_bytes: bytes_written,
                 level: 0,
                 min_key: mem_table.min_key().clone(),
                 max_key: mem_table.max_key().clone(),

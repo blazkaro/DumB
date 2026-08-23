@@ -116,9 +116,7 @@ impl SsTableMerger {
             return Ok(());
         }
 
-        let maximum_output_size: u64 = self.storage_config.ss_table_level_1_target_size_bytes
-            as u64
-            * (self.storage_config.ss_table_level_growth_factor as u64).pow(target_level as u32);
+        let maximum_output_size = self.storage_config.ss_table_target_size_bytes as u64;
 
         let (mut writer_temp, mut current_id) = self.new_ss_table_output(target_level).await?;
         *writer = Some(writer_temp);

@@ -11,6 +11,7 @@ pub struct SsTableReader {
     dma_reader: DmaStreamReader,
     storage_config: Rc<StorageConfig>,
     level: SsTableLevel,
+    file_size: u64,
 }
 
 impl SsTableReader {
@@ -18,6 +19,7 @@ impl SsTableReader {
         file: DmaFile,
         storage_config: Rc<StorageConfig>,
     ) -> Result<Self, GlommioError<()>> {
+        let file_size = file.file_size().await?;
         let mut dma_reader = DmaStreamReaderBuilder::new(file)
             .with_start_pos(0)
             .with_buffer_size(storage_config.ss_table_read_buffer_size as usize)
@@ -33,7 +35,12 @@ impl SsTableReader {
             dma_reader,
             storage_config,
             level,
+            file_size,
         })
+    }
+
+    pub fn is_eof(&self) -> bool {
+        self.dma_reader.current_pos() >= self.file_size
     }
 
     pub async fn next_entry(&mut self) -> Result<DbEntry, GlommioError<()>> {

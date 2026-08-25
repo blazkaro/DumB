@@ -1,16 +1,15 @@
 use crate::compaction::merger::SsTableMerger;
-use crate::db_entry::DbKey;
 use crate::manifest::handler::ManifestHandler;
 use crate::manifest::snapshot::ManifestSnapshot;
+use crate::manifest::snapshot_lookup::SnapshotLookup;
 use crate::ss_table::id_generator::SsTableIdGenerator;
-use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
+use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::StreamExt;
 use glommio::channels::local_channel::LocalReceiver;
 use glommio::io::Directory;
 use glommio::{GlommioError, Latency, Shares};
 use std::cmp::{max, min};
-use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -129,12 +128,12 @@ impl SsTableCompactor {
         }
 
         let level_1_overlap =
-            self.get_overlap(1, level_0_min_key.clone(), level_0_max_key, snapshot);
+            SnapshotLookup::get_overlap(1, level_0_min_key.clone(), level_0_max_key, snapshot);
 
         let table_ids = level_0
             .iter()
             .map(|t| t.id)
-            .chain(level_1_overlap.into_iter())
+            .chain(level_1_overlap.into_iter().map(|t| t.id))
             .collect();
 
         self.merger.merge_ss_tables(table_ids, 1).await
@@ -161,47 +160,14 @@ impl SsTableCompactor {
         let mut table_ids = Vec::with_capacity(1);
         table_ids.push(prev_level_ss_table.id);
 
-        let target_level_overlap = self.get_overlap(
+        let target_level_overlap = SnapshotLookup::get_overlap(
             target_level,
             prev_level_ss_table.min_key.clone(),
             &prev_level_ss_table.max_key,
             &snapshot,
         );
-        table_ids.extend(target_level_overlap.into_iter());
+        table_ids.extend(target_level_overlap.into_iter().map(|t| t.id));
 
         self.merger.merge_ss_tables(table_ids, target_level).await
-    }
-
-    fn get_overlap(
-        &self,
-        target_level: SsTableLevel,
-        min_key: DbKey,
-        max_key: &DbKey,
-        snapshot: &ManifestSnapshot,
-    ) -> Vec<SsTableId> {
-        let level = snapshot.get_level(target_level).unwrap_or_default();
-        let lower_bound: SsTableMetadata = SsTableMetadata::min_key_bound(min_key.clone());
-
-        let mut overlap = Vec::new();
-
-        // Preceding (overlap may happen when table's min_key is lesser than our lower bound, but the lower bound is lesser than the table's max_key)
-        if let Some(preceding) = level
-            .range::<SsTableMetadata, _>((Unbounded, Excluded(&lower_bound)))
-            .next_back()
-        {
-            if &preceding.max_key >= &min_key {
-                overlap.push(preceding.id);
-            }
-        }
-
-        // For target levels > 0 ranges don't overlap, so min_key is sorted and take_while is safe.
-        overlap.extend(
-            level
-                .range::<SsTableMetadata, _>((Included(&lower_bound), Unbounded))
-                .take_while(|t| &t.min_key <= &max_key)
-                .map(|t| t.id),
-        );
-
-        overlap
     }
 }

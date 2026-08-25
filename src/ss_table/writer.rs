@@ -1,4 +1,4 @@
-use crate::db_entry::{DbEntry, DbKey, DbValue};
+use crate::db_entry::{DbKey, DbValue};
 use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::AsyncWriteExt;
@@ -39,7 +39,7 @@ impl SsTableWriter {
             .await?; // Key length
         self.dma_writer.write_all(&key).await?; // Key
 
-        match &value {
+        match value {
             DbValue::Value(bytes) => {
                 self.dma_writer.write_all(&[0u8]).await?; // Value type
                 self.dma_writer
@@ -62,12 +62,12 @@ impl SsTableWriter {
         Ok(())
     }
 
-    pub fn db_entry_bytes_size(entry: &DbEntry) -> u32 {
+    pub fn db_entry_bytes_size(key: &DbKey, value: &DbValue) -> u32 {
         // Key length in bytes + key bytes + value type in bytes (0 = value, or 1 = tombstone)
         size_of::<u32>() as u32
-            + entry.key.len() as u32
+            + key.len() as u32
             + size_of::<u8>() as u32
-            + match &entry.value {
+            + match value {
                 DbValue::Value(bytes) => {
                     // + value length in bytes + value in bytes
                     size_of::<u32>() as u32 + bytes.len() as u32

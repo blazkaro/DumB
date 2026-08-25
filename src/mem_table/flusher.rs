@@ -1,26 +1,24 @@
 use crate::compaction::trigger::CompactionTrigger;
 use crate::manifest::handler::ManifestHandler;
+use crate::mem_table::immutable::ImmutableMemTables;
 use crate::mem_table::mem_table::MemTable;
 use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::ss_table::metadata::SsTableMetadata;
 use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
-use glommio::GlommioError;
+use futures::StreamExt;
+use glommio::channels::local_channel::{LocalReceiver, LocalSender};
 use glommio::io::{Directory, DmaFile};
+use glommio::{GlommioError, Latency, Shares};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-pub struct MemTableFlusher {
-    cpu_shard_id: u32,
-    storage_config: Rc<StorageConfig>,
-    dir: PathBuf,
-    manifest: ManifestHandler,
-    compaction_trigger: CompactionTrigger,
-    parent: Directory,
-    id_generator: Rc<SsTableIdGenerator>,
+#[derive(Clone)]
+pub struct MemTableFlushHandler<MT: MemTable + 'static> {
+    sender: Rc<LocalSender<Rc<MT>>>,
 }
 
-impl MemTableFlusher {
+impl<MT: MemTable + 'static> MemTableFlushHandler<MT> {
     pub async fn new(
         dir: PathBuf,
         cpu_shard_id: u32,
@@ -28,9 +26,12 @@ impl MemTableFlusher {
         manifest: ManifestHandler,
         compaction_trigger: CompactionTrigger,
         id_generator: Rc<SsTableIdGenerator>,
-    ) -> Result<MemTableFlusher, GlommioError<()>> {
+        shares: Shares,
+        latency: Latency,
+    ) -> Result<Self, GlommioError<()>> {
         let parent = Directory::open(&dir).await?;
-        Ok(Self {
+
+        let internal = MemTableFlusherInternal {
             cpu_shard_id,
             storage_config,
             dir,
@@ -38,10 +39,56 @@ impl MemTableFlusher {
             compaction_trigger,
             parent,
             id_generator,
+            immutable_mem_tables: ImmutableMemTables::new(),
+        };
+
+        let (sender, receiver) = glommio::channels::local_channel::new_unbounded();
+
+        let queue_name = format!("mem-table-flusher-{cpu_shard_id}");
+        let task_queue =
+            glommio::executor().create_task_queue(shares, latency, queue_name.as_str());
+
+        glommio::spawn_local_into(internal.run(receiver), task_queue)
+            .expect("failed to spawn mem table flusher onto its task queue")
+            .detach();
+
+        Ok(Self {
+            sender: Rc::new(sender),
         })
     }
 
-    pub async fn flush<MT: MemTable>(&mut self, mem_table: MT) -> Result<(), GlommioError<()>> {
+    pub fn flush(&self, mem_table: Rc<MT>) -> Result<(), GlommioError<Rc<MT>>> {
+        self.sender.try_send(mem_table)
+    }
+}
+
+struct MemTableFlusherInternal<MT: MemTable> {
+    cpu_shard_id: u32,
+    storage_config: Rc<StorageConfig>,
+    dir: PathBuf,
+    manifest: ManifestHandler,
+    compaction_trigger: CompactionTrigger,
+    parent: Directory,
+    id_generator: Rc<SsTableIdGenerator>,
+    immutable_mem_tables: ImmutableMemTables<MT>,
+}
+
+impl<MT: MemTable> MemTableFlusherInternal<MT> {
+    async fn run(mut self, receiver: LocalReceiver<Rc<MT>>) {
+        let mut mem_tables = receiver.stream();
+
+        while let Some(mem_table) = mem_tables.next().await {
+            match self.flush(mem_table.as_ref()).await {
+                Ok(()) => self.immutable_mem_tables.pop(), // because both channel (local receiver) and immutable mem tables are FIFO, it removes just flushed mem table
+                Err(e) => {
+                    // Serious problem here: in memory data wasn't durably saved, so we need something in order to not loss it forever
+                    // TODO: retry policy
+                }
+            }
+        }
+    }
+
+    async fn flush(&mut self, mem_table: &MT) -> Result<(), GlommioError<()>> {
         // ATOMICITY: we're not flushing to temp file, but we won't list this ss table in manifest unless completely saved
         let id = self.id_generator.next_id();
         let path = self

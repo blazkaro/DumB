@@ -9,7 +9,6 @@ use glommio::GlommioError;
 use glommio::io::{Directory, DmaFile};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -259,16 +258,17 @@ impl SsTableMerger {
         level: SsTableLevel,
         ss_table_id: SsTableId,
     ) -> Result<(), GlommioError<()>> {
-        match reader.next_entry().await {
-            Ok(next) => heap.push(HeapEntry {
-                db_entry: next,
-                level,
-                ss_table_id,
-                reader_idx,
-            }),
-            Err(GlommioError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => {} // exhausted, fine
-            Err(e) => return Err(e), // anything else is a real failure — propagate it
+        if reader.is_eof() {
+            return Ok(());
         }
+
+        let entry = reader.next_entry().await?;
+        heap.push(HeapEntry {
+            db_entry: entry,
+            level,
+            ss_table_id,
+            reader_idx,
+        });
 
         Ok(())
     }

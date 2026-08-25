@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod le_reader;
 pub mod compaction;
 pub mod ss_table;
+pub mod commands;
 
 fn main() {
     println!("Hello, world!");

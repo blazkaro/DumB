@@ -8,6 +8,8 @@ pub struct StorageConfig {
     pub ss_table_level_1_target_size_bytes: u32,
     pub ss_table_level_0_target_tables_count: u8,
     pub ss_table_level_growth_factor: u8,
+    pub ss_table_target_size_bytes: u32,
+    pub ss_table_block_target_size_bytes: u32,
     pub ss_table_read_buffer_size: u32,
     pub ss_table_buffer_read_ahead: u32,
 }

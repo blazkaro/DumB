@@ -1,8 +1,8 @@
 use crate::manifest::entry::ManifestEntry;
 use crate::manifest::snapshot::ManifestSnapshot;
 use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
-use glommio::GlommioError;
-use glommio::io::{BufferedFile, Directory};
+use glommio_ng::GlommioError;
+use glommio_ng::io::{BufferedFile, Directory};
 use std::collections::{BTreeSet, HashMap};
 use std::io::ErrorKind;
 use std::path::Path;
@@ -33,7 +33,9 @@ impl ManifestInternal {
     ) -> Result<Self, GlommioError<()>> {
         match Self::open(dir, cpu_shard_id).await {
             Ok(manifest) => Ok(manifest),
-            Err(GlommioError::IoError(e)) if e.kind() == ErrorKind::NotFound => {
+            Err(GlommioError::EnhancedIoError { source, .. })
+                if source.kind() == ErrorKind::NotFound =>
+            {
                 Self::create(dir, cpu_shard_id).await
             }
             Err(e) => Err(e),

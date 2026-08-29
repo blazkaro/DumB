@@ -5,8 +5,8 @@ use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
-use glommio::GlommioError;
-use glommio::io::{Directory, DmaFile};
+use glommio_ng::GlommioError;
+use glommio_ng::io::{Directory, DmaFile};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
@@ -198,7 +198,7 @@ impl SsTableMerger {
                     .ss_table_compaction_yield_check_processed_threshold
                 == 0
             {
-                glommio::yield_if_needed().await;
+                glommio_ng::yield_if_needed().await;
             }
         }
 

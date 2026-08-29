@@ -3,8 +3,8 @@ use crate::le_reader::LeReader;
 use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::AsyncReadExt;
-use glommio::GlommioError;
-use glommio::io::{DmaFile, DmaStreamReader, DmaStreamReaderBuilder};
+use glommio_ng::GlommioError;
+use glommio_ng::io::{DmaFile, DmaStreamReader, DmaStreamReaderBuilder};
 use std::rc::Rc;
 
 pub struct SsTableReader {

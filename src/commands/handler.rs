@@ -7,8 +7,8 @@ use crate::mem_table::mem_table::{MemTable, MemTableError};
 use crate::ss_table::metadata::{SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::storage_config::StorageConfig;
-use glommio::GlommioError;
-use glommio::io::DmaFile;
+use glommio_ng::GlommioError;
+use glommio_ng::io::DmaFile;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -23,6 +23,24 @@ pub struct CommandHandler<MT: MemTable + 'static> {
 }
 
 impl<MT: MemTable + 'static> CommandHandler<MT> {
+    pub fn new(
+        flusher: MemTableFlushHandler<MT>,
+        manifest: ManifestHandler,
+        ss_tables_dir: PathBuf,
+        cpu_shard_id: u32,
+        storage_config: Rc<StorageConfig>,
+    ) -> Self {
+        Self {
+            mem_table: MT::new(Rc::clone(&storage_config)),
+            mem_table_flusher: flusher,
+            storage_config: Rc::clone(&storage_config),
+            immutable_mem_tables: ImmutableMemTables::<MT>::new(),
+            manifest,
+            ss_tables_dir,
+            cpu_shard_id,
+        }
+    }
+
     pub fn set(&mut self, key: DbKey, value: DbValue) -> Result<(), GlommioError<()>> {
         let entry = DbEntry { key, value };
 
@@ -47,7 +65,7 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         Ok(())
     }
 
-    pub async fn get(&mut self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GlommioError<()>> {
+    pub async fn get(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GlommioError<()>> {
         if let Some(value) = self.mem_table.get(key) {
             return Ok(Some(value));
         }

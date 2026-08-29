@@ -2,17 +2,17 @@
 <project version="4">
   <component name="RemoteTargetsManager">
     <targets>
-      <target name="WSL - Ubuntu" type="wsl" uuid="81931d27-1cbd-4b29-8e89-bcb8ced8ce0e">
+      <target name="WSL - Ubuntu" type="wsl" uuid="215a360b-e9b9-49e7-83ab-b826e413d9bc">
         <config>
           <option name="distributionMsId" value="Ubuntu" />
-          <option name="projectRootOnTarget" value="{exitCode=0, timeout=false, cancelled=false, stdout=/tmp/tmp.TvvLa2SL49&#13;&#10;, stderr=}/DumB" />
+          <option name="projectRootOnTarget" value="{exitCode=0, timeout=false, cancelled=false, stdout=/tmp/tmp.iZEVW6TS3s&#13;&#10;, stderr=}/DumB" />
         </config>
         <ContributedStateBase type="RsLanguageRuntime">
           <config>
             <option name="cargoPath" value="/home/blazkaro/.cargo/bin/cargo" />
-            <option name="cargoVersion" value="1.97.1 (c980f4866 2026-06-30)" />
+            <option name="cargoVersion" value="1.98.0 (797e8a9bc 2026-08-05)" />
             <option name="rustcPath" value="/home/blazkaro/.cargo/bin/rustc" />
-            <option name="rustcVersion" value="1.97.1 (8bab26f4f 2026-07-14)" />
+            <option name="rustcVersion" value="1.98.0 (88d9e12ae 2026-08-18)" />
           </config>
         </ContributedStateBase>
       </target>

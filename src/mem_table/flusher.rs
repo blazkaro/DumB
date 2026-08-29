@@ -7,9 +7,9 @@ use crate::ss_table::metadata::SsTableMetadata;
 use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
 use futures::StreamExt;
-use glommio::channels::local_channel::{LocalReceiver, LocalSender};
-use glommio::io::{Directory, DmaFile};
-use glommio::{GlommioError, Latency, Shares};
+use glommio_ng::channels::local_channel::{LocalReceiver, LocalSender};
+use glommio_ng::io::{Directory, DmaFile};
+use glommio_ng::{GlommioError, Latency, Shares};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -42,13 +42,13 @@ impl<MT: MemTable + 'static> MemTableFlushHandler<MT> {
             immutable_mem_tables: ImmutableMemTables::new(),
         };
 
-        let (sender, receiver) = glommio::channels::local_channel::new_unbounded();
+        let (sender, receiver) = glommio_ng::channels::local_channel::new_unbounded();
 
         let queue_name = format!("mem-table-flusher-{cpu_shard_id}");
         let task_queue =
-            glommio::executor().create_task_queue(shares, latency, queue_name.as_str());
+            glommio_ng::executor().create_task_queue(shares, latency, queue_name.as_str());
 
-        glommio::spawn_local_into(internal.run(receiver), task_queue)
+        glommio_ng::spawn_local_into(internal.run(receiver), task_queue)
             .expect("failed to spawn mem table flusher onto its task queue")
             .detach();
 
@@ -79,7 +79,7 @@ impl<MT: MemTable> MemTableFlusherInternal<MT> {
 
         while let Some(mem_table) = mem_tables.next().await {
             match self.flush(mem_table.as_ref()).await {
-                Ok(()) => self.immutable_mem_tables.pop(), // because both channel (local receiver) and immutable mem tables are FIFO, it removes just flushed mem table
+                Ok(()) => self.immutable_mem_tables.pop(), // because both channel (local receiver) and immutable mem tables are FIFO, it removes currently processed mem table
                 Err(e) => {
                     // Serious problem here: in memory data wasn't durably saved, so we need something in order to not loss it forever
                     // TODO: retry policy

@@ -6,9 +6,9 @@ use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::StreamExt;
-use glommio::channels::local_channel::LocalReceiver;
-use glommio::io::Directory;
-use glommio::{GlommioError, Latency, Shares};
+use glommio_ng::channels::local_channel::LocalReceiver;
+use glommio_ng::io::Directory;
+use glommio_ng::{GlommioError, Latency, Shares};
 use std::cmp::{max, min};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -50,12 +50,12 @@ impl SsTableCompactor {
         })
     }
 
-    pub async fn spawn(self, shares: Shares, latency: Latency) {
+    pub fn spawn(self, shares: Shares, latency: Latency) {
         let queue_name = format!("ss-table-compactor-{}", self.cpu_shard_id);
         let task_queue =
-            glommio::executor().create_task_queue(shares, latency, queue_name.as_str());
+            glommio_ng::executor().create_task_queue(shares, latency, queue_name.as_str());
 
-        glommio::spawn_local_into(self.run(), task_queue)
+        glommio_ng::spawn_local_into(self.run(), task_queue)
             .expect("failed to spawn compactor onto its task queue")
             .detach();
     }

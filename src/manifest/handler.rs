@@ -2,9 +2,9 @@ use crate::manifest::internal::ManifestInternal;
 use crate::manifest::snapshot::ManifestSnapshot;
 use crate::ss_table::metadata::{SsTableId, SsTableMetadata};
 use futures::StreamExt;
-use glommio::channels::local_channel;
-use glommio::channels::local_channel::{LocalReceiver, LocalSender};
-use glommio::{GlommioError, Latency, Shares};
+use glommio_ng::channels::local_channel;
+use glommio_ng::channels::local_channel::{LocalReceiver, LocalSender};
+use glommio_ng::{GlommioError, Latency, Shares};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -59,11 +59,11 @@ impl ManifestHandler {
 
         let queue_name = format!("manifest-writer-{cpu_shard_id}");
         let task_queue =
-            glommio::executor().create_task_queue(shares, latency, queue_name.as_str());
+            glommio_ng::executor().create_task_queue(shares, latency, queue_name.as_str());
 
         let (sender, receiver) = local_channel::new_unbounded();
 
-        glommio::spawn_local_into(
+        glommio_ng::spawn_local_into(
             Self::actor_loop(manifest, receiver, Rc::clone(&current_snapshot)),
             task_queue,
         )

@@ -2,8 +2,8 @@ use crate::db_entry::{DbKey, DbValue};
 use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::AsyncWriteExt;
-use glommio::GlommioError;
-use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder};
+use glommio_ng::GlommioError;
+use glommio_ng::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder};
 use std::rc::Rc;
 
 pub struct SsTableWriter {

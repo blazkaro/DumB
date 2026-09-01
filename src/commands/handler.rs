@@ -9,11 +9,12 @@ use crate::ss_table::reader::SsTableReader;
 use crate::storage_config::StorageConfig;
 use glommio_ng::GlommioError;
 use glommio_ng::io::DmaFile;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 pub struct CommandHandler<MT: MemTable + 'static> {
-    mem_table: MT,
+    mem_table: Rc<RefCell<MT>>, // NEVER HELD MID-AWAIT
     mem_table_flusher: MemTableFlushHandler<MT>,
     storage_config: Rc<StorageConfig>,
     immutable_mem_tables: ImmutableMemTables<MT>,
@@ -31,7 +32,7 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         storage_config: Rc<StorageConfig>,
     ) -> Self {
         Self {
-            mem_table: MT::new(Rc::clone(&storage_config)),
+            mem_table: Rc::new(RefCell::new(MT::new(Rc::clone(&storage_config)))),
             mem_table_flusher: flusher,
             storage_config: Rc::clone(&storage_config),
             immutable_mem_tables: ImmutableMemTables::<MT>::new(),
@@ -41,18 +42,19 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         }
     }
 
-    pub fn set(&mut self, key: DbKey, value: DbValue) -> Result<(), GlommioError<()>> {
+    pub fn set(&self, key: DbKey, value: DbValue) -> Result<(), GlommioError<()>> {
         let entry = DbEntry { key, value };
 
-        let entry = match self.mem_table.set(entry) {
+        let entry = match self.mem_table.borrow_mut().set(entry) {
             Ok(()) => return Ok(()),
             Err(MemTableError::SizeExceeded(entry)) => entry,
         };
 
-        let full = std::mem::replace(
-            &mut self.mem_table,
-            MT::new(Rc::clone(&self.storage_config)),
-        );
+        let full = {
+            let mut guard = self.mem_table.borrow_mut();
+            std::mem::replace(&mut *guard, MT::new(Rc::clone(&self.storage_config)))
+        };
+
         let full = Rc::new(full);
 
         self.immutable_mem_tables.push(Rc::clone(&full));
@@ -60,13 +62,13 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             GlommioError::IoError(std::io::Error::other("flusher task is no longer running"))
         })?;
 
-        let _ = self.mem_table.set(entry); // fresh mem table isn't going to overflow
+        let _ = self.mem_table.borrow_mut().set(entry); // fresh mem table isn't going to overflow
 
         Ok(())
     }
 
     pub async fn get(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GlommioError<()>> {
-        if let Some(value) = self.mem_table.get(key) {
+        if let Some(value) = self.mem_table.borrow().get(key) {
             return Ok(Some(value));
         }
 
@@ -74,10 +76,10 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             return Ok(Some(value));
         }
 
-        self.search_ss_tables(key).await
+        self.search_ss_tables(key).await // No mem table borrow is held here - ALL MEM TABLE OPS ARE SYNC, NO ASYNC RACES
     }
 
-    pub fn remove(&mut self, key: DbKey) -> Result<(), GlommioError<()>> {
+    pub fn remove(&self, key: DbKey) -> Result<(), GlommioError<()>> {
         self.set(key, DbValue::Tombstone)
     }
 
@@ -90,9 +92,6 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
 
             for ss_table in candidates {
                 if let Some(value) = self.search_ss_table(key, ss_table).await? {
-                    if value.as_ref() == &DbValue::Tombstone {
-                        return Ok(None);
-                    }
                     return Ok(Some(value));
                 }
             }
@@ -110,10 +109,6 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
 
                 for ss_table in overlapping {
                     if let Some(value) = self.search_ss_table(key, ss_table).await? {
-                        if value.as_ref() == &DbValue::Tombstone {
-                            return Ok(None);
-                        }
-
                         return Ok(Some(value));
                     }
                 }

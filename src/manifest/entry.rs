@@ -31,6 +31,10 @@ impl ManifestEntry {
     }
 
     pub(super) fn decode(buffer: &[u8]) -> Option<(ManifestEntry, u32)> {
+        if buffer.len() == 0 {
+            return None;
+        }
+
         let mut offset: usize = 0;
 
         let entry_type: u8 = buffer[0];

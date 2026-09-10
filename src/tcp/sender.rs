@@ -33,7 +33,7 @@ impl TcpCommandSender {
                         }
                     }
                 } else {
-                    stream.write_all(&[0u8]).await?; // Value length, 0 bytes
+                    stream.write_all(&0u32.to_le_bytes()).await?; // Value length, 0 bytes
                 }
             }
             CommandResult::ShardMismatch => {

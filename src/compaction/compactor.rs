@@ -1,15 +1,19 @@
+use crate::compaction::errors::{CompactionError, MergeError};
 use crate::compaction::merger::SsTableMerger;
+use crate::errors::retryable::RetryableError;
 use crate::manifest::handler::ManifestHandler;
 use crate::manifest::snapshot::ManifestSnapshot;
 use crate::manifest::snapshot_lookup::SnapshotLookup;
+use crate::retries::retry::{RetryPolicy, retry_if};
 use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::StreamExt;
 use glommio_ng::channels::local_channel::LocalReceiver;
 use glommio_ng::io::Directory;
-use glommio_ng::{GlommioError, Latency, Shares};
+use glommio_ng::{Latency, Shares};
 use std::cmp::{max, min};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -20,6 +24,7 @@ pub struct SsTableCompactor {
     storage_config: Rc<StorageConfig>,
     parent: Directory,
     merger: SsTableMerger,
+    retry_policy: RetryPolicy,
 }
 
 impl SsTableCompactor {
@@ -30,8 +35,11 @@ impl SsTableCompactor {
         storage_config: Rc<StorageConfig>,
         dir: PathBuf,
         id_generator: Rc<SsTableIdGenerator>,
-    ) -> Result<Self, GlommioError<()>> {
-        let parent = Directory::open(&dir).await?;
+        retry_policy: RetryPolicy,
+    ) -> Result<Self, CompactionError> {
+        let parent = Directory::open(&dir)
+            .await
+            .map_err(|e| CompactionError::DirOpenFailed(e.into()))?;
         let merger = SsTableMerger::new(
             cpu_shard_id,
             dir.clone(),
@@ -47,6 +55,7 @@ impl SsTableCompactor {
             storage_config,
             parent,
             merger,
+            retry_policy,
         })
     }
 
@@ -60,18 +69,20 @@ impl SsTableCompactor {
             .detach();
     }
 
-    async fn run(mut self) {
+    async fn run(self) {
         let manifest = self.manifest.clone();
         let mut signals = self.trigger_receiver.stream();
 
         while signals.next().await.is_some() {
-            let _ = self.checked_compaction(&manifest).await;
+            self.checked_compaction(&manifest).await;
         }
     }
 
-    async fn checked_compaction(&self, manifest: &ManifestHandler) -> Result<(), GlommioError<()>> {
-        let mut snapshot = manifest.snapshot();
+    async fn checked_compaction(&self, manifest: &ManifestHandler) -> () {
+        let mut broken_levels: HashSet<SsTableLevel> = HashSet::new();
+
         loop {
+            let snapshot = manifest.snapshot();
             let l0_score = snapshot.table_count_at_level(0) as f32
                 / self.storage_config.ss_table_level_0_target_tables_count as f32;
 
@@ -89,26 +100,44 @@ impl SsTableCompactor {
                             (level, score)
                         }),
                 )
-                .filter(|(_, score)| *score >= 1.0)
+                .filter(|(level, score)| *score >= 1.0 && !broken_levels.contains(level))
                 .max_by(|a, b| a.1.total_cmp(&b.1));
 
             let Some((level, _score)) = candidate else {
-                break;
+                break; // nothing to compact
             };
 
-            if level == 0 {
-                self.merge_l0_into_l1(&snapshot).await?;
-            } else {
-                self.merge_target_level(level + 1, &snapshot).await?;
+            match retry_if(
+                &self.retry_policy,
+                async || {
+                    let snapshot = self.manifest.snapshot();
+                    if level == 0 {
+                        self.merge_l0_into_l1(&snapshot)
+                            .await
+                            .map_err(CompactionError::MergeError)
+                    } else {
+                        self.merge_target_level(level + 1, &snapshot)
+                            .await
+                            .map_err(CompactionError::MergeError)
+                    }
+                },
+                |e| e.is_retryable(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(_) => {
+                    // compaction for n-th level failed permanently, we may retry on next trigger, but leave it for now.
+                    // Probably human intervention is needed (disk out of space etc.)
+                    // TODO: we may go in read-only mode
+                    broken_levels.insert(level);
+                    continue;
+                }
             }
-
-            snapshot = manifest.snapshot();
         }
-
-        Ok(())
     }
 
-    async fn merge_l0_into_l1(&self, snapshot: &ManifestSnapshot) -> Result<(), GlommioError<()>> {
+    async fn merge_l0_into_l1(&self, snapshot: &ManifestSnapshot) -> Result<(), MergeError> {
         // Get global range (min key, max key) for level 0 and get files from level 1 which contains this range
         let level_0 = snapshot
             .get_level(0)
@@ -143,14 +172,14 @@ impl SsTableCompactor {
         &self,
         target_level: SsTableLevel,
         snapshot: &ManifestSnapshot,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), MergeError> {
         // Get first ss table and merge it into overlapping range
         let prev_level = target_level - 1;
         if prev_level <= 0 {
             panic!("This method only works on target level > 1");
         }
 
-        let mut prev_level = snapshot.get_level(prev_level).unwrap_or_default();
+        let prev_level = snapshot.get_level(prev_level).unwrap_or_default();
         if prev_level.is_empty() {
             return Ok(());
         }

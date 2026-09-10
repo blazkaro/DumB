@@ -1,7 +1,7 @@
 use crate::manifest::entry::ManifestEntry;
+use crate::manifest::errors::{ManifestOpenError, ManifestWriteError};
 use crate::manifest::snapshot::ManifestSnapshot;
 use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
-use glommio_ng::GlommioError;
 use glommio_ng::io::{BufferedFile, Directory};
 use std::collections::{BTreeSet, HashMap};
 use std::io::ErrorKind;
@@ -30,22 +30,20 @@ impl ManifestInternal {
     pub(super) async fn open_or_create(
         dir: &Path,
         cpu_shard_id: u32,
-    ) -> Result<Self, GlommioError<()>> {
+    ) -> Result<Self, ManifestOpenError> {
         match Self::open(dir, cpu_shard_id).await {
             Ok(manifest) => Ok(manifest),
-            Err(GlommioError::EnhancedIoError { source, .. })
-                if source.kind() == ErrorKind::NotFound =>
-            {
+            Err(ManifestOpenError::Open(src)) if src.kind() == ErrorKind::NotFound => {
                 Self::create(dir, cpu_shard_id).await
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
     pub(super) async fn add_ss_table(
         &mut self,
         metadata: SsTableMetadata,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), ManifestWriteError> {
         let rc = Rc::new(metadata);
 
         self.append(ManifestEntry::AddSsTable(rc.clone())).await?;
@@ -59,7 +57,10 @@ impl ManifestInternal {
         Ok(())
     }
 
-    pub(super) async fn remove_ss_table(&mut self, id: SsTableId) -> Result<(), GlommioError<()>> {
+    pub(super) async fn remove_ss_table(
+        &mut self,
+        id: SsTableId,
+    ) -> Result<(), ManifestWriteError> {
         self.append(ManifestEntry::RemoveSsTable(id)).await?;
         Self::memory_remove_ss_table(
             &mut self.by_id,
@@ -71,13 +72,13 @@ impl ManifestInternal {
         Ok(())
     }
 
-    // Compaction isn't just set of add and remove - they all need to be done in batch, all or none at once (fulfill ACID
+    // Compaction isn't just set of add and remove - they all need to be done in batch, all or none at once (fulfill ACID)
     // That is why this method exists
     pub(super) async fn apply_compaction(
         &mut self,
         new_ss_tables: Vec<SsTableMetadata>,
         old_ss_table_ids: Vec<SsTableId>,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), ManifestWriteError> {
         let to_add: Vec<Rc<SsTableMetadata>> = new_ss_tables.into_iter().map(Rc::new).collect();
 
         let entries = old_ss_table_ids
@@ -115,11 +116,19 @@ impl ManifestInternal {
         ManifestSnapshot::new(self.by_level.clone(), self.level_size_bytes.clone())
     }
 
-    async fn open(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
+    async fn open(dir: &Path, cpu_shard_id: u32) -> Result<Self, ManifestOpenError> {
         let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
-        let file = BufferedFile::open(&path).await?;
-        let file_size = file.file_size().await? as usize;
-        let result = file.read_at(0, file_size).await?;
+        let file = BufferedFile::open(&path)
+            .await
+            .map_err(|e| ManifestOpenError::Open(e.into()))?;
+        let file_size = file
+            .file_size()
+            .await
+            .map_err(|e| ManifestOpenError::Read(e.into()))? as usize;
+        let result = file
+            .read_at(0, file_size)
+            .await
+            .map_err(|e| ManifestOpenError::Read(e.into()))?;
 
         let mut by_id: HashMap<SsTableId, Rc<SsTableMetadata>> = HashMap::new();
         let mut by_level: HashMap<SsTableLevel, Rc<BTreeSet<Rc<SsTableMetadata>>>> = HashMap::new();
@@ -156,16 +165,28 @@ impl ManifestInternal {
         })
     }
 
-    async fn create(dir: &Path, cpu_shard_id: u32) -> Result<Self, GlommioError<()>> {
+    async fn create(dir: &Path, cpu_shard_id: u32) -> Result<Self, ManifestOpenError> {
         let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
 
+        let file = BufferedFile::create(&path)
+            .await
+            .map_err(|e| ManifestOpenError::Create(e.into()))?;
+
         // DURABILITY: Flush to disk
-        let file = BufferedFile::create(&path).await?;
-        file.fdatasync().await?;
+        file.fdatasync()
+            .await
+            .map_err(|e| ManifestOpenError::Create(e.into()))?;
 
         // DURABILITY: Sync dir metadata
-        let parent = Directory::open(&dir).await?;
-        parent.sync().await?;
+        let parent = Directory::open(&dir)
+            .await
+            .map_err(|e| ManifestOpenError::DirMetadataSync(e.into()))?;
+        parent
+            .sync()
+            .await
+            .map_err(|e| ManifestOpenError::DirMetadataSync(e.into()))?;
+
+        let _ = parent.close().await;
 
         Ok(Self {
             cpu_shard_id,
@@ -178,26 +199,29 @@ impl ManifestInternal {
         })
     }
 
-    async fn append(&mut self, entry: ManifestEntry) -> Result<(), GlommioError<()>> {
+    async fn append(&mut self, entry: ManifestEntry) -> Result<(), ManifestWriteError> {
         let mut buffer = std::mem::take(&mut self.entry_serialization_buffer);
         buffer.clear();
         entry.encode(&mut buffer);
 
         let next_capacity = buffer.capacity();
-        let len = buffer.len() as u64;
-        let pos = self.write_pos;
-
-        self.write_pos += len;
         self.entry_serialization_buffer = Vec::with_capacity(next_capacity);
-        self.file.write_at(buffer, pos).await?; // buffer is gone
+
+        self.safe_write_at(buffer).await?;
 
         // DURABILITY: flush to disk
-        self.file.fdatasync().await?;
+        self.file
+            .fdatasync()
+            .await
+            .map_err(|e| ManifestWriteError::NotDurable(e.into()))?;
 
         Ok(())
     }
 
-    async fn append_batch(&mut self, entries: Vec<ManifestEntry>) -> Result<(), GlommioError<()>> {
+    async fn append_batch(
+        &mut self,
+        entries: Vec<ManifestEntry>,
+    ) -> Result<(), ManifestWriteError> {
         let mut buffer =
             Vec::with_capacity(entries.len() * self.entry_serialization_buffer.capacity());
 
@@ -205,16 +229,39 @@ impl ManifestInternal {
             entry.encode(&mut buffer);
         }
 
-        let len = buffer.len() as u64;
-        let pos = self.write_pos;
-
-        self.write_pos += len;
-        self.file.write_at(buffer, pos).await?;
+        self.safe_write_at(buffer).await?;
 
         // ATOMICITY, DURABILITY: flush batch at once
-        self.file.fdatasync().await?;
+        self.file
+            .fdatasync()
+            .await
+            .map_err(|e| ManifestWriteError::NotDurable(e.into()))?;
 
         Ok(())
+    }
+
+    async fn safe_write_at(&mut self, buffer: Vec<u8>) -> Result<(), ManifestWriteError> {
+        let pos = self.write_pos;
+        let buffer_len = buffer.len();
+        let pre_write_file_size = self.write_pos;
+
+        match self.file.write_at(buffer, pos).await {
+            Ok(bytes_written) => {
+                if buffer_len != bytes_written {
+                    self.file
+                        .truncate(pre_write_file_size)
+                        .await
+                        .expect("Could not recover manifest after incomplete write");
+                    // TODO: Without checksums, we can't really do anything clever
+
+                    Err(ManifestWriteError::IncompleteWrite)
+                } else {
+                    self.write_pos += buffer_len as u64;
+                    Ok(())
+                }
+            }
+            Err(e) => Err(ManifestWriteError::WriteFailed(e.into())),
+        }
     }
 
     fn memory_add_ss_table(

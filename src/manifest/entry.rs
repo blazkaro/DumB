@@ -7,6 +7,7 @@ pub(super) enum ManifestEntry {
     RemoveSsTable(SsTableId),        // 1
 }
 
+// TODO: checksums
 impl ManifestEntry {
     pub(super) fn encode(&self, buffer: &mut Vec<u8>) {
         match &self {

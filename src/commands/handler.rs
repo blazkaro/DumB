@@ -1,3 +1,4 @@
+use crate::commands::errors::{GetError, RemoveError, SetError};
 use crate::db_entry::{DbEntry, DbKey, DbValue};
 use crate::manifest::handler::ManifestHandler;
 use crate::manifest::snapshot_lookup::SnapshotLookup;
@@ -7,7 +8,6 @@ use crate::mem_table::mem_table::{MemTable, MemTableError};
 use crate::ss_table::metadata::{SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::storage_config::StorageConfig;
-use glommio_ng::GlommioError;
 use glommio_ng::io::DmaFile;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         }
     }
 
-    pub fn set(&self, key: DbKey, value: DbValue) -> Result<(), GlommioError<()>> {
+    pub fn set(&self, key: DbKey, value: DbValue) -> Result<(), SetError> {
         let entry = DbEntry { key, value };
 
         let entry = match self.mem_table.borrow_mut().set(entry) {
@@ -50,24 +50,22 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             Err(MemTableError::SizeExceeded(entry)) => entry,
         };
 
-        let full = {
+        let full = Rc::new({
             let mut guard = self.mem_table.borrow_mut();
             std::mem::replace(&mut *guard, MT::new(Rc::clone(&self.storage_config)))
-        };
-
-        let full = Rc::new(full);
+        });
 
         self.immutable_mem_tables.push(Rc::clone(&full));
-        self.mem_table_flusher.flush(full).map_err(|_| {
-            GlommioError::IoError(std::io::Error::other("flusher task is no longer running"))
-        })?;
+        self.mem_table_flusher
+            .flush(full)
+            .map_err(SetError::FlusherFailure)?;
 
         let _ = self.mem_table.borrow_mut().set(entry); // fresh mem table isn't going to overflow
 
         Ok(())
     }
 
-    pub async fn get(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GlommioError<()>> {
+    pub async fn get(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GetError> {
         if let Some(value) = self.mem_table.borrow().get(key) {
             return Ok(Some(value));
         }
@@ -79,11 +77,11 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         self.search_ss_tables(key).await // No mem table borrow is held here - ALL MEM TABLE OPS ARE SYNC, NO ASYNC RACES
     }
 
-    pub fn remove(&self, key: DbKey) -> Result<(), GlommioError<()>> {
+    pub fn remove(&self, key: DbKey) -> Result<(), RemoveError> {
         self.set(key, DbValue::Tombstone)
     }
 
-    async fn search_ss_tables(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GlommioError<()>> {
+    async fn search_ss_tables(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GetError> {
         let snapshot = self.manifest.snapshot();
 
         if let Some(level_0) = snapshot.get_level(0) {
@@ -100,17 +98,14 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         for level_idx in 1..snapshot.levels_count() {
             let level_idx = level_idx as SsTableLevel;
 
-            if let Some(level) = snapshot.get_level(level_idx) {
-                let overlapping =
-                    SnapshotLookup::get_overlap(level_idx, key.clone(), key, &snapshot);
-                if overlapping.is_empty() {
-                    continue;
-                }
+            let overlapping = SnapshotLookup::get_overlap(level_idx, key.clone(), key, &snapshot);
+            if overlapping.is_empty() {
+                continue;
+            }
 
-                for ss_table in overlapping {
-                    if let Some(value) = self.search_ss_table(key, ss_table).await? {
-                        return Ok(Some(value));
-                    }
+            for ss_table in overlapping {
+                if let Some(value) = self.search_ss_table(key, ss_table).await? {
+                    return Ok(Some(value));
                 }
             }
         }
@@ -122,17 +117,21 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         &self,
         key: &DbKey,
         ss_table: Rc<SsTableMetadata>,
-    ) -> Result<Option<Rc<DbValue>>, GlommioError<()>> {
+    ) -> Result<Option<Rc<DbValue>>, GetError> {
         let path = self
             .ss_tables_dir
             .join(format!("ss_table_{}_{}", self.cpu_shard_id, ss_table.id));
 
-        let file = DmaFile::open(&path).await?;
-        let mut reader = SsTableReader::init(file, Rc::clone(&self.storage_config)).await?;
+        let file = DmaFile::open(&path)
+            .await
+            .map_err(|e| GetError::OpenFailure(e.into()))?;
+        let mut reader = SsTableReader::init(file, Rc::clone(&self.storage_config))
+            .await
+            .map_err(GetError::ReadFailure)?;
 
         let result = async {
             while !reader.is_eof() {
-                let entry = reader.next_entry().await?;
+                let entry = reader.next_entry().await.map_err(GetError::ReadFailure)?;
                 if entry.key == *key {
                     return Ok(Some(Rc::new(entry.value)));
                 }
@@ -141,7 +140,7 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         }
         .await;
 
-        reader.close().await?;
+        reader.close().await.map_err(GetError::ReadFailure)?;
         result
     }
 }

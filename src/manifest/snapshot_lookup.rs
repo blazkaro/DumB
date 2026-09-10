@@ -13,7 +13,16 @@ impl SnapshotLookup {
         max_key: &DbKey,
         snapshot: &ManifestSnapshot,
     ) -> Vec<Rc<SsTableMetadata>> {
+        assert_ne!(
+            target_level, 0,
+            "Finding overlap should not happen at 0-th level"
+        );
+
         let level = snapshot.get_level(target_level).unwrap_or_default();
+        if level.is_empty() {
+            return Vec::new();
+        }
+
         let lower_bound: SsTableMetadata = SsTableMetadata::min_key_bound(min_key.clone());
 
         let mut overlap = Vec::new();

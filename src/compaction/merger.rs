@@ -1,3 +1,4 @@
+use crate::compaction::errors::MergeError;
 use crate::db_entry::{DbEntry, DbKey};
 use crate::manifest::handler::ManifestHandler;
 use crate::ss_table::id_generator::SsTableIdGenerator;
@@ -5,7 +6,6 @@ use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
-use glommio_ng::GlommioError;
 use glommio_ng::io::{Directory, DmaFile};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -76,7 +76,7 @@ impl SsTableMerger {
         &self,
         ss_table_ids: Vec<SsTableId>,
         target_level: SsTableLevel,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), MergeError> {
         let mut readers: Vec<(SsTableReader, SsTableId)> = self.get_readers(&ss_table_ids).await?;
         let mut writer: Option<SsTableWriter> = None;
         let result = self
@@ -84,9 +84,7 @@ impl SsTableMerger {
             .await;
 
         // Async cleanup (relying on ? would use sync Drop), that is why we use outer/inner
-        for (reader, _) in readers.into_iter() {
-            let _ = reader.close().await;
-        }
+        Self::cleanup_readers(readers).await;
 
         if let Some(w) = writer {
             let _ = w.finish().await;
@@ -102,7 +100,7 @@ impl SsTableMerger {
         readers: &mut [(SsTableReader, SsTableId)],
         writer: &mut Option<SsTableWriter>,
         target_level: SsTableLevel,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), MergeError> {
         // Initialize heap with first entry of every ss table
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
         let mut reader_idx = 0;
@@ -120,7 +118,7 @@ impl SsTableMerger {
         let (mut writer_temp, mut current_id) = self.new_ss_table_output(target_level).await?;
         *writer = Some(writer_temp);
 
-        let mut new_ss_tables: Vec<SsTableMetadata> = Vec::with_capacity(readers.len() / 2); // compaction produces fewer tables than there were initially, that capacity is purely magic number because it's not worth calculating
+        let mut new_ss_tables: Vec<SsTableMetadata> = Vec::with_capacity(readers.len());
         let mut min_key: DbKey = Vec::default();
         let mut entry_count = 0u32;
         let mut total_processed_count = 0u32;
@@ -165,7 +163,8 @@ impl SsTableMerger {
                 .as_mut()
                 .unwrap()
                 .write_entry(&top.db_entry.key, &top.db_entry.value)
-                .await?;
+                .await
+                .map_err(MergeError::WriterError)?;
 
             entry_count += 1;
 
@@ -181,7 +180,12 @@ impl SsTableMerger {
                 });
 
                 // DURABILITY: flush to disk
-                writer.take().unwrap().finish().await?;
+                writer
+                    .take()
+                    .unwrap()
+                    .finish()
+                    .await
+                    .map_err(MergeError::WriterError)?;
 
                 if heap.is_empty() {
                     break;
@@ -203,14 +207,23 @@ impl SsTableMerger {
         }
 
         // Sync metadata
-        let parent = Directory::open(&self.dir).await?;
-        parent.sync().await?;
-        parent.close().await?;
+        let parent = Directory::open(&self.dir)
+            .await
+            .map_err(|e| MergeError::DirMetadataSync(e.into()))?;
+        parent
+            .sync()
+            .await
+            .map_err(|e| MergeError::DirMetadataSync(e.into()))?;
+        parent
+            .close()
+            .await
+            .map_err(|e| MergeError::DirMetadataSync(e.into()))?;
 
         // Register in manifest after durable changes
         self.manifest
             .apply_compaction(new_ss_tables, readers.iter().map(|(_, id)| *id).collect())
-            .await?;
+            .await
+            .map_err(MergeError::ManifestRegistrationFailure)?;
 
         Ok(())
     }
@@ -218,7 +231,7 @@ impl SsTableMerger {
     async fn get_readers(
         &self,
         ss_table_ids: &[SsTableId],
-    ) -> Result<Vec<(SsTableReader, SsTableId)>, GlommioError<()>> {
+    ) -> Result<Vec<(SsTableReader, SsTableId)>, MergeError> {
         let mut readers: Vec<(SsTableReader, SsTableId)> = Vec::with_capacity(ss_table_ids.len());
         for id in ss_table_ids {
             let path = self
@@ -228,20 +241,16 @@ impl SsTableMerger {
             let file = match DmaFile::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    for (r, _) in readers {
-                        let _ = r.close().await;
-                    }
-                    return Err(e);
+                    Self::cleanup_readers(readers).await;
+                    return Err(MergeError::OpenError(e.into()));
                 }
             };
 
             let reader = match SsTableReader::init(file, Rc::clone(&self.storage_config)).await {
                 Ok(r) => r,
                 Err(e) => {
-                    for (r, _) in readers {
-                        let _ = r.close().await;
-                    }
-                    return Err(e);
+                    Self::cleanup_readers(readers).await;
+                    return Err(MergeError::ReaderError(e));
                 }
             };
 
@@ -251,18 +260,24 @@ impl SsTableMerger {
         Ok(readers)
     }
 
+    async fn cleanup_readers(readers: Vec<(SsTableReader, SsTableId)>) {
+        for (r, _) in readers {
+            let _ = r.close().await;
+        }
+    }
+
     async fn advance_reader(
         reader: &mut SsTableReader,
         heap: &mut BinaryHeap<HeapEntry>,
         reader_idx: usize,
         level: SsTableLevel,
         ss_table_id: SsTableId,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), MergeError> {
         if reader.is_eof() {
             return Ok(());
         }
 
-        let entry = reader.next_entry().await?;
+        let entry = reader.next_entry().await.map_err(MergeError::ReaderError)?;
         heap.push(HeapEntry {
             db_entry: entry,
             level,
@@ -276,16 +291,19 @@ impl SsTableMerger {
     async fn new_ss_table_output(
         &self,
         level: SsTableLevel,
-    ) -> Result<(SsTableWriter, SsTableId), GlommioError<()>> {
+    ) -> Result<(SsTableWriter, SsTableId), MergeError> {
         let id = self.id_generator.next_id();
         let path = self
             .dir
             .join(format!("ss_table_{}_{}", self.cpu_shard_id, id));
 
-        let output_file = DmaFile::create(&path).await?;
+        let output_file = DmaFile::create(&path)
+            .await
+            .map_err(|e| MergeError::CreateError(e.into()))?;
 
-        let writer =
-            SsTableWriter::init(output_file, level, Rc::clone(&self.storage_config)).await?;
+        let writer = SsTableWriter::init(output_file, level, Rc::clone(&self.storage_config))
+            .await
+            .map_err(MergeError::WriterError)?;
 
         Ok((writer, id))
     }

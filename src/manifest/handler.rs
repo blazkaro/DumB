@@ -1,15 +1,16 @@
+use crate::manifest::errors::{ManifestOpenError, ManifestWriteError};
 use crate::manifest::internal::ManifestInternal;
 use crate::manifest::snapshot::ManifestSnapshot;
 use crate::ss_table::metadata::{SsTableId, SsTableMetadata};
 use futures::StreamExt;
 use glommio_ng::channels::local_channel;
 use glommio_ng::channels::local_channel::{LocalReceiver, LocalSender};
-use glommio_ng::{GlommioError, Latency, Shares};
+use glommio_ng::{Latency, Shares};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-type ManifestReply = LocalSender<Result<(), GlommioError<()>>>;
+type ManifestReply = LocalSender<Result<(), ManifestWriteError>>;
 
 pub enum ManifestCommand {
     AddSsTable {
@@ -44,7 +45,7 @@ impl ManifestHandler {
         cpu_shard_id: u32,
         shares: Shares,
         latency: Latency,
-    ) -> Result<Self, GlommioError<()>> {
+    ) -> Result<Self, ManifestOpenError> {
         let manifest = ManifestInternal::open_or_create(dir, cpu_shard_id).await?;
         Ok(Self::spawn(manifest, cpu_shard_id, shares, latency))
     }
@@ -83,40 +84,34 @@ impl ManifestHandler {
     ) {
         let mut commands = receiver.stream();
         while let Some(cmd) = commands.next().await {
-            match cmd {
+            // While it looks like we could retry here, don't do that. Callers should handle manifest failures as part of bigger retry mechanism (flush, compaction)
+            let (result, reply) = match cmd {
                 ManifestCommand::AddSsTable { metadata, reply } => {
-                    let result = manifest.add_ss_table(metadata).await;
-                    if result.is_ok() {
-                        *current_snapshot.borrow_mut() = Rc::new(manifest.snapshot());
-                    }
-                    let _ = reply.try_send(result); // caller may have gone away, ignore
+                    (manifest.add_ss_table(metadata).await, reply)
                 }
                 ManifestCommand::RemoveSsTable { id, reply } => {
-                    let result = manifest.remove_ss_table(id).await;
-                    if result.is_ok() {
-                        *current_snapshot.borrow_mut() = Rc::new(manifest.snapshot());
-                    }
-                    let _ = reply.try_send(result);
+                    (manifest.remove_ss_table(id).await, reply)
                 }
                 ManifestCommand::Compaction {
                     new_ss_tables,
                     old_ss_table_ids,
                     reply,
-                } => {
-                    let result = manifest
+                } => (
+                    manifest
                         .apply_compaction(new_ss_tables, old_ss_table_ids)
-                        .await;
+                        .await,
+                    reply,
+                ),
+            };
 
-                    if result.is_ok() {
-                        *current_snapshot.borrow_mut() = Rc::new(manifest.snapshot());
-                    }
-                    let _ = reply.try_send(result);
-                }
+            if result.is_ok() {
+                *current_snapshot.borrow_mut() = Rc::new(manifest.snapshot());
             }
+            let _ = reply.try_send(result); // caller may have gone away, ignore
         }
     }
 
-    pub async fn add_ss_table(&self, metadata: SsTableMetadata) -> Result<(), GlommioError<()>> {
+    pub async fn add_ss_table(&self, metadata: SsTableMetadata) -> Result<(), ManifestWriteError> {
         let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
             .send(ManifestCommand::AddSsTable {
@@ -133,7 +128,7 @@ impl ManifestHandler {
             .expect("manifest actor dropped without responding")
     }
 
-    pub async fn remove_ss_table(&self, id: SsTableId) -> Result<(), GlommioError<()>> {
+    pub async fn remove_ss_table(&self, id: SsTableId) -> Result<(), ManifestWriteError> {
         let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
             .send(ManifestCommand::RemoveSsTable {
@@ -154,7 +149,7 @@ impl ManifestHandler {
         &self,
         new_ss_tables: Vec<SsTableMetadata>,
         old_ss_table_ids: Vec<SsTableId>,
-    ) -> Result<(), GlommioError<()>> {
+    ) -> Result<(), ManifestWriteError> {
         let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
             .send(ManifestCommand::Compaction {

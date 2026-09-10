@@ -2,7 +2,7 @@ use crate::commands::handler::CommandHandler;
 use crate::commands::request::CommandRequest;
 use crate::db_entry::DbValue;
 use crate::mem_table::mem_table::MemTable;
-use glommio_ng::GlommioError;
+use crate::shards::errors::CommandRouterError;
 use std::rc::Rc;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -27,7 +27,7 @@ impl<MT: MemTable + 'static> ShardRouter<MT> {
         }
     }
 
-    pub async fn dispatch(&self, req: CommandRequest) -> Result<CommandResult, GlommioError<()>> {
+    pub async fn dispatch(&self, req: CommandRequest) -> Result<CommandResult, CommandRouterError> {
         let key = match &req {
             CommandRequest::Set(cmd) => &cmd.key,
             CommandRequest::Get(cmd) => &cmd.key,
@@ -45,20 +45,31 @@ impl<MT: MemTable + 'static> ShardRouter<MT> {
         }
     }
 
-    async fn execute_local(&self, req: CommandRequest) -> Result<CommandResult, GlommioError<()>> {
+    async fn execute_local(
+        &self,
+        req: CommandRequest,
+    ) -> Result<CommandResult, CommandRouterError> {
         match req {
             CommandRequest::Set(cmd) => {
-                self.command_handler.set(cmd.key, cmd.value)?;
+                self.command_handler
+                    .set(cmd.key, cmd.value)
+                    .map_err(CommandRouterError::SetFailed)?;
                 Ok(CommandResult::Ack)
             }
 
             CommandRequest::Get(cmd) => {
-                let value = self.command_handler.get(&cmd.key).await?;
+                let value = self
+                    .command_handler
+                    .get(&cmd.key)
+                    .await
+                    .map_err(CommandRouterError::GetFailed)?;
                 Ok(CommandResult::Value(value))
             }
 
             CommandRequest::Remove(cmd) => {
-                self.command_handler.remove(cmd.key)?;
+                self.command_handler
+                    .remove(cmd.key)
+                    .map_err(CommandRouterError::RemoveFailed)?;
                 Ok(CommandResult::Ack)
             }
         }

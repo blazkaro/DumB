@@ -89,12 +89,15 @@ impl Listener {
 
             if let Some(cmd) = command {
                 let result = router.dispatch(cmd).await;
-                if let Ok(cmd_result) = result {
-                    let _ = TcpCommandSender::send(&mut stream, cmd_result).await;
-                    // TODO: handle send result error
-                } else {
-                    // TODO: handle error
-                    break; // for now just drop connection
+                match result {
+                    Ok(cmd_result) => {
+                        let _ = TcpCommandSender::send(&mut stream, cmd_result).await;
+                        // TODO: handle send result error
+                    }
+                    Err(e) => {
+                        // TODO: handle error
+                        break; // for now just drop connection
+                    }
                 }
             } else {
                 break; // connection closed

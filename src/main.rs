@@ -4,6 +4,7 @@ use crate::compaction::trigger::CompactionTrigger;
 use crate::manifest::handler::ManifestHandler;
 use crate::mem_table::btree_mem_table::BTreeMemTable;
 use crate::mem_table::flusher::MemTableFlushHandler;
+use crate::retries::retry::RetryPolicy;
 use crate::shards::router::ShardRouter;
 use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::storage_config::StorageConfig;
@@ -12,13 +13,16 @@ use glommio_ng::{CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, Share
 use std::future::pending;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub mod commands;
 pub mod compaction;
 pub mod db_entry;
+pub mod errors;
 pub mod le_reader;
 pub mod manifest;
 pub mod mem_table;
+pub mod retries;
 pub mod shards;
 pub mod ss_table;
 pub mod storage_config;
@@ -86,6 +90,11 @@ fn main() {
                 manifest.clone(),
                 compaction_trigger,
                 Rc::clone(&ss_table_id_generator),
+                RetryPolicy {
+                    max_attempts: 5,
+                    base_delay: Duration::from_millis(100),
+                    max_delay: Duration::from_millis(5000),
+                },
                 Shares::Static(120),
                 Latency::NotImportant,
             )
@@ -99,6 +108,11 @@ fn main() {
                 Rc::clone(&storage_config),
                 ss_tables_dir.clone(),
                 Rc::clone(&ss_table_id_generator),
+                RetryPolicy {
+                    max_attempts: 5,
+                    base_delay: Duration::from_millis(100),
+                    max_delay: Duration::from_millis(5000),
+                },
             )
             .await
             .expect("Failed to create compactor");

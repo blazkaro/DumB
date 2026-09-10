@@ -1,9 +1,9 @@
 use crate::db_entry::{DbEntry, DbValue};
 use crate::le_reader::LeReader;
+use crate::ss_table::errors::SsTableReadError;
 use crate::ss_table::metadata::SsTableLevel;
 use crate::storage_config::StorageConfig;
 use futures::AsyncReadExt;
-use glommio_ng::GlommioError;
 use glommio_ng::io::{DmaFile, DmaStreamReader, DmaStreamReaderBuilder};
 use std::rc::Rc;
 
@@ -18,8 +18,11 @@ impl SsTableReader {
     pub async fn init(
         file: DmaFile,
         storage_config: Rc<StorageConfig>,
-    ) -> Result<Self, GlommioError<()>> {
-        let file_size = file.file_size().await?;
+    ) -> Result<Self, SsTableReadError> {
+        let file_size = file
+            .file_size()
+            .await
+            .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
         let mut dma_reader = DmaStreamReaderBuilder::new(file)
             .with_start_pos(0)
             .with_buffer_size(storage_config.ss_table_read_buffer_size as usize)
@@ -27,7 +30,10 @@ impl SsTableReader {
             .build();
 
         let mut level_bytes = [0u8; 2]; // u16
-        dma_reader.read_exact(&mut level_bytes).await?;
+        dma_reader
+            .read_exact(&mut level_bytes)
+            .await
+            .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
 
         let level = LeReader::read_u16_le(level_bytes.as_slice(), 0);
 
@@ -43,26 +49,41 @@ impl SsTableReader {
         self.dma_reader.current_pos() >= self.file_size
     }
 
-    pub async fn next_entry(&mut self) -> Result<DbEntry, GlommioError<()>> {
+    pub async fn next_entry(&mut self) -> Result<DbEntry, SsTableReadError> {
         let mut key_len_bytes = [0u8; 4];
-        self.dma_reader.read_exact(&mut key_len_bytes).await?;
+        self.dma_reader
+            .read_exact(&mut key_len_bytes)
+            .await
+            .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
 
         let key_len = LeReader::read_u32_le(key_len_bytes.as_slice(), 0);
         let mut key = vec![0u8; key_len as usize];
-        self.dma_reader.read_exact(key.as_mut_slice()).await?;
+        self.dma_reader
+            .read_exact(key.as_mut_slice())
+            .await
+            .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
 
         let mut value_type_bytes = [0u8];
-        self.dma_reader.read_exact(&mut value_type_bytes).await?;
+        self.dma_reader
+            .read_exact(&mut value_type_bytes)
+            .await
+            .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
         let value_type = value_type_bytes[0];
         let value = match value_type {
             0u8 => {
                 let mut value_len_bytes = [0u8; 4];
-                self.dma_reader.read_exact(&mut value_len_bytes).await?;
+                self.dma_reader
+                    .read_exact(&mut value_len_bytes)
+                    .await
+                    .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
 
                 let value_len = LeReader::read_u32_le(value_len_bytes.as_slice(), 0);
 
                 let mut value = vec![0u8; value_len as usize];
-                self.dma_reader.read_exact(value.as_mut_slice()).await?;
+                self.dma_reader
+                    .read_exact(value.as_mut_slice())
+                    .await
+                    .map_err(|e| SsTableReadError::ReadFailed(e.into()))?;
                 DbValue::Value(value)
             }
             1u8 => DbValue::Tombstone,
@@ -76,7 +97,10 @@ impl SsTableReader {
         self.level
     }
 
-    pub async fn close(self) -> Result<(), GlommioError<()>> {
-        self.dma_reader.close().await
+    pub async fn close(self) -> Result<(), SsTableReadError> {
+        self.dma_reader
+            .close()
+            .await
+            .map_err(|e| SsTableReadError::CloseFailed(e.into()))
     }
 }

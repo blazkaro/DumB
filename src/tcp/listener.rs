@@ -62,6 +62,8 @@ impl Listener {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+
                     glommio_ng::spawn_local_into(
                         Self::handle_connection(stream.buffered(), Rc::clone(&router_rc)),
                         requests_queue,

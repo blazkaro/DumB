@@ -12,42 +12,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="9241af2b-a504-4561-bd65-20c79f4a252b" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/src/commands/errors.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/compaction/errors.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/errors.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/errors/classified.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/errors/retryable.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/manifest/errors.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/mem_table/errors.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/retries.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/retries/retry.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/shards/errors.rs" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/ss_table/errors.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/commands.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/commands.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/commands/handler.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/commands/handler.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/commands/set.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/commands/set.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/compaction.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/compaction.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/compaction/compactor.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/compaction/compactor.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/compaction/merger.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/compaction/merger.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/compaction/trigger.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/compaction/trigger.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/manifest.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/manifest.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/manifest/entry.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/manifest/entry.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/manifest/handler.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/manifest/handler.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/manifest/internal.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/manifest/internal.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/manifest/snapshot_lookup.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/manifest/snapshot_lookup.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mem_table.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mem_table.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/mem_table/flusher.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/mem_table/flusher.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/shards.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/shards.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/shards/router.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/shards/router.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ss_table.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/ss_table.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ss_table/reader.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/ss_table/reader.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/ss_table/writer.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/ss_table/writer.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/tcp/listener.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/listener.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/tcp/sender.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/sender.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

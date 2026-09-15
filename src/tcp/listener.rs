@@ -3,6 +3,7 @@ use crate::mem_table::mem_table::MemTable;
 use crate::shards::router::ShardRouter;
 use crate::tcp::decoder::TcpCommandDecoder;
 use crate::tcp::sender::TcpCommandSender;
+use futures::AsyncReadExt;
 use glommio_ng::net::{Preallocated, TcpListener, TcpStream};
 use glommio_ng::{Latency, Shares};
 use std::rc::Rc;
@@ -62,8 +63,6 @@ impl Listener {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
-                    let _ = stream.set_nodelay(true);
-
                     glommio_ng::spawn_local_into(
                         Self::handle_connection(stream.buffered(), Rc::clone(&router_rc)),
                         requests_queue,
@@ -79,11 +78,14 @@ impl Listener {
     }
 
     async fn handle_connection(
-        mut stream: TcpStream<Preallocated>,
+        stream: TcpStream<Preallocated>,
         router: Rc<ShardRouter<impl MemTable>>,
     ) {
+        let _ = stream.set_nodelay(true);
+        let (mut read_half, mut write_half) = stream.split();
+        // TODO: next decode cannot wait for full round-trip wal -> dispatch -> send, otherwise WAL batches won't be able to fill up and throughput will degrade significantly
         loop {
-            let command = match TcpCommandDecoder::tcp_decode(&mut stream).await {
+            let command = match TcpCommandDecoder::tcp_decode(&mut read_half).await {
                 Ok(command) => command,
                 Err(CommandDecodingError::InvalidInput) => break,
                 Err(_) => break,
@@ -93,7 +95,7 @@ impl Listener {
                 let result = router.dispatch(cmd).await;
                 match result {
                     Ok(cmd_result) => {
-                        let _ = TcpCommandSender::send(&mut stream, cmd_result).await;
+                        let _ = TcpCommandSender::send(&mut write_half, cmd_result).await;
                         // TODO: handle send result error
                     }
                     Err(e) => {

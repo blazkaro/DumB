@@ -1,4 +1,6 @@
 use crate::commands::errors::{GetError, RemoveError, SetError};
+use crate::commands::request::CommandRequest;
+use crate::commands::set::SetCommand;
 use crate::db_entry::{DbEntry, DbKey, DbValue};
 use crate::manifest::handler::ManifestHandler;
 use crate::manifest::snapshot_lookup::SnapshotLookup;
@@ -8,6 +10,7 @@ use crate::mem_table::mem_table::{MemTable, MemTableError};
 use crate::ss_table::metadata::{SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::storage_config::StorageConfig;
+use crate::wal::log::Wal;
 use glommio_ng::io::DmaFile;
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -19,6 +22,7 @@ pub struct CommandHandler<MT: MemTable + 'static> {
     storage_config: Rc<StorageConfig>,
     immutable_mem_tables: ImmutableMemTables<MT>,
     manifest: ManifestHandler,
+    wal: Wal,
     ss_tables_dir: PathBuf,
     cpu_shard_id: u32,
 }
@@ -27,6 +31,7 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
     pub fn new(
         flusher: MemTableFlushHandler<MT>,
         manifest: ManifestHandler,
+        wal: Wal,
         ss_tables_dir: PathBuf,
         cpu_shard_id: u32,
         storage_config: Rc<StorageConfig>,
@@ -37,13 +42,20 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             storage_config: Rc::clone(&storage_config),
             immutable_mem_tables: ImmutableMemTables::<MT>::new(),
             manifest,
+            wal,
             ss_tables_dir,
             cpu_shard_id,
         }
     }
 
-    pub fn set(&self, key: DbKey, value: DbValue) -> Result<(), SetError> {
-        let entry = DbEntry { key, value };
+    pub async fn set(&self, key: DbKey, value: DbValue) -> Result<(), SetError> {
+        let entry = DbEntry {
+            key: key.clone(),
+            value: value.clone(),
+        };
+
+        let req = CommandRequest::Set(SetCommand { key, value });
+        self.wal.append(req).await.map_err(SetError::WalFailure)?;
 
         let entry = match self.mem_table.borrow_mut().set(entry) {
             Ok(()) => return Ok(()),
@@ -77,8 +89,8 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         self.search_ss_tables(key).await // No mem table borrow is held here - ALL MEM TABLE OPS ARE SYNC, NO ASYNC RACES
     }
 
-    pub fn remove(&self, key: DbKey) -> Result<(), RemoveError> {
-        self.set(key, DbValue::Tombstone)
+    pub async fn remove(&self, key: DbKey) -> Result<(), RemoveError> {
+        self.set(key, DbValue::Tombstone).await
     }
 
     async fn search_ss_tables(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GetError> {

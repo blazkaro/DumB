@@ -53,6 +53,7 @@ impl<MT: MemTable + 'static> ShardRouter<MT> {
             CommandRequest::Set(cmd) => {
                 self.command_handler
                     .set(cmd.key, cmd.value)
+                    .await
                     .map_err(CommandRouterError::SetFailed)?;
                 Ok(CommandResult::Ack)
             }
@@ -69,6 +70,7 @@ impl<MT: MemTable + 'static> ShardRouter<MT> {
             CommandRequest::Remove(cmd) => {
                 self.command_handler
                     .remove(cmd.key)
+                    .await
                     .map_err(CommandRouterError::RemoveFailed)?;
                 Ok(CommandResult::Ack)
             }

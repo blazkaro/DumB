@@ -12,4 +12,5 @@ pub struct StorageConfig {
     pub ss_table_block_target_size_bytes: u32,
     pub ss_table_read_buffer_size: u32,
     pub ss_table_buffer_read_ahead: u32,
+    pub avg_command_size_hint: u32,
 }

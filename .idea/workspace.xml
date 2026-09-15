@@ -12,8 +12,22 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="9241af2b-a504-4561-bd65-20c79f4a252b" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/src/wal.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/wal/errors.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/wal/log.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/wal/mode.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/wal/writer.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/commands/errors.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/commands/errors.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/commands/handler.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/commands/handler.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/shards/router.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/shards/router.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/storage_config.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/storage_config.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/tcp/decoder.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/decoder.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/tcp/listener.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/listener.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/tcp/sender.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/sender.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

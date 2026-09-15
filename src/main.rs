@@ -9,6 +9,8 @@ use crate::shards::router::ShardRouter;
 use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::storage_config::StorageConfig;
 use crate::tcp::listener::Listener;
+use crate::wal::log::Wal;
+use crate::wal::mode::WalMode;
 use glommio_ng::{CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, Shares};
 use std::future::pending;
 use std::path::PathBuf;
@@ -27,11 +29,14 @@ pub mod shards;
 pub mod ss_table;
 pub mod storage_config;
 pub mod tcp;
+pub mod wal;
 
 fn main() {
     let shards_count = CpuSet::online()
         .expect("Could not get online CPU cores")
         .len(); // Counts logical cores, for true thread-per-core disable Hyper-Threading
+
+    let shards_count = 1;
 
     let placement = PoolPlacement::MaxSpread(shards_count, None);
     let home_path = PathBuf::from(std::env::var_os("HOME").expect("Failed to get home directory"));
@@ -64,6 +69,9 @@ fn main() {
                 ss_table_block_target_size_bytes: 16 * 1024, // 16KB per block
                 ss_table_read_buffer_size: 128 * 1024,       // 128KB,
                 ss_table_buffer_read_ahead: 2,
+
+                // Buffer hints
+                avg_command_size_hint: 196,
             });
 
             let ss_tables_dir = shard_dir.join("ss");
@@ -119,9 +127,30 @@ fn main() {
 
             compactor.spawn(Shares::Static(50), Latency::NotImportant);
 
+            // TODO: configurable mode
+            let wal_path = shard_dir.join("wal");
+            std::fs::create_dir_all(&wal_path).expect("Failed to create WAL directory");
+
+            let wal_mode = WalMode::Strict {
+                batch_window: Duration::from_millis(10000),
+                max_batch_size: 1024,
+            };
+
+            let wal = Wal::init(
+                cpu_shard_id,
+                wal_mode,
+                &wal_path,
+                Rc::clone(&storage_config),
+                Shares::Static(300),
+                Latency::NotImportant,
+            )
+            .await
+            .expect("Failed to create WAL");
+
             let command_handler = CommandHandler::new(
                 flusher,
                 manifest.clone(),
+                wal,
                 ss_tables_dir.clone(),
                 cpu_shard_id,
                 Rc::clone(&storage_config),
@@ -133,7 +162,7 @@ fn main() {
                 shard_router,
                 Shares::Static(30),
                 Latency::NotImportant,
-                Shares::Static(600),
+                Shares::Static(300),
                 Latency::NotImportant,
             );
 

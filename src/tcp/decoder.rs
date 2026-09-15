@@ -5,6 +5,7 @@ use crate::commands::set::SetCommand;
 use crate::db_entry::DbValue;
 use crate::le_reader::LeReader;
 use futures::AsyncReadExt;
+use futures::io::ReadHalf;
 use glommio_ng::net::{Preallocated, TcpStream};
 
 pub struct TcpCommandDecoder {}
@@ -13,7 +14,7 @@ pub struct TcpCommandDecoder {}
 // Then, depending on command type, there may be value len (4 bytes), value (y bytes)
 impl TcpCommandDecoder {
     pub async fn tcp_decode(
-        stream: &mut TcpStream<Preallocated>,
+        stream: &mut ReadHalf<TcpStream<Preallocated>>,
     ) -> Result<Option<CommandRequest>, CommandDecodingError> {
         let mut command_type_bytes = [0u8; 1];
         match stream.read(&mut command_type_bytes).await {
@@ -55,7 +56,7 @@ impl TcpCommandDecoder {
 
                 Ok(Some(CommandRequest::Set(SetCommand {
                     key,
-                    value: DbValue::Value(value),
+                    value: DbValue::Value(value), // We assume client can't use SET to write Tombstone
                 })))
             }
             1 => Ok(Some(CommandRequest::Get(GetCommand { key }))),

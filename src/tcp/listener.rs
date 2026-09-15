@@ -1,12 +1,19 @@
 use crate::commands::request::CommandDecodingError;
 use crate::mem_table::mem_table::MemTable;
-use crate::shards::router::ShardRouter;
+use crate::shards::router::{CommandResult, ShardRouter};
 use crate::tcp::decoder::TcpCommandDecoder;
 use crate::tcp::sender::TcpCommandSender;
-use futures::AsyncReadExt;
+use futures::io::WriteHalf;
+use futures::{AsyncReadExt, StreamExt};
+use glommio_ng::channels::local_channel::LocalReceiver;
 use glommio_ng::net::{Preallocated, TcpListener, TcpStream};
-use glommio_ng::{Latency, Shares};
+use glommio_ng::{Latency, Shares, TaskQueueHandle};
 use std::rc::Rc;
+
+pub struct TcpCommandResult {
+    pub result: CommandResult,
+    pub req_id: u16,
+}
 
 pub struct Listener {}
 
@@ -16,31 +23,22 @@ impl Listener {
     pub fn listen(
         cpu_shard_id: u32,
         shard_router: ShardRouter<impl MemTable>,
-        listen_shares: Shares,
-        listen_latency: Latency,
-        request_shares: Shares,
-        request_latency: Latency,
+        shares: Shares,
+        latency: Latency,
     ) {
         let shard_port = Self::PORT + cpu_shard_id - 1;
         let tcp_listener = TcpListener::bind(format!("0.0.0.0:{shard_port}"))
             .expect("failed to bind TCP listener");
 
-        let queue_name = format!("tcp-listener-{cpu_shard_id}");
-        let connection_queue = glommio_ng::executor().create_task_queue(
-            listen_shares,
-            listen_latency,
-            queue_name.as_str(),
+        let requests_queue = glommio_ng::executor().create_task_queue(
+            shares,
+            latency,
+            format!("requests-{cpu_shard_id}").as_str(),
         );
 
         glommio_ng::spawn_local_into(
-            Self::accept_connection(
-                tcp_listener,
-                shard_router,
-                cpu_shard_id,
-                request_shares,
-                request_latency,
-            ),
-            connection_queue,
+            Self::accept_connection(tcp_listener, shard_router, requests_queue),
+            requests_queue,
         )
         .expect("failed to spawn tcp listener onto its task queue")
         .detach();
@@ -49,23 +47,19 @@ impl Listener {
     async fn accept_connection(
         listener: TcpListener,
         router: ShardRouter<impl MemTable>,
-        cpu_shard_id: u32,
-        shares: Shares,
-        latency: Latency,
+        task_queue: TaskQueueHandle,
     ) {
-        let requests_queue = glommio_ng::executor().create_task_queue(
-            shares,
-            latency,
-            format!("requests-{cpu_shard_id}").as_str(),
-        );
-
         let router_rc = Rc::new(router);
         loop {
             match listener.accept().await {
                 Ok(stream) => {
                     glommio_ng::spawn_local_into(
-                        Self::handle_connection(stream.buffered(), Rc::clone(&router_rc)),
-                        requests_queue,
+                        Self::handle_connection(
+                            stream.buffered(),
+                            Rc::clone(&router_rc),
+                            task_queue,
+                        ),
+                        task_queue,
                     )
                     .unwrap()
                     .detach();
@@ -80,31 +74,65 @@ impl Listener {
     async fn handle_connection(
         stream: TcpStream<Preallocated>,
         router: Rc<ShardRouter<impl MemTable>>,
+        task_queue: TaskQueueHandle,
     ) {
         let _ = stream.set_nodelay(true);
-        let (mut read_half, mut write_half) = stream.split();
-        // TODO: next decode cannot wait for full round-trip wal -> dispatch -> send, otherwise WAL batches won't be able to fill up and throughput will degrade significantly
+        let (mut read_half, write_half) = stream.split();
+
+        let (response_tx, response_rx) =
+            glommio_ng::channels::local_channel::new_unbounded::<TcpCommandResult>();
+        let response_tx = Rc::new(response_tx);
+
+        // The ONLY task that uses writer half. No concurrent calls on write-half.
+        glommio_ng::spawn_local_into(Self::writer_task(write_half, response_rx), task_queue)
+            .unwrap()
+            .detach();
+
         loop {
-            let command = match TcpCommandDecoder::tcp_decode(&mut read_half).await {
+            let decoded_opt = match TcpCommandDecoder::tcp_decode(&mut read_half).await {
                 Ok(command) => command,
                 Err(CommandDecodingError::InvalidInput) => break,
                 Err(_) => break,
             };
 
-            if let Some(cmd) = command {
-                let result = router.dispatch(cmd).await;
-                match result {
-                    Ok(cmd_result) => {
-                        let _ = TcpCommandSender::send(&mut write_half, cmd_result).await;
-                        // TODO: handle send result error
-                    }
-                    Err(e) => {
-                        // TODO: handle error
-                        break; // for now just drop connection
-                    }
-                }
+            if let Some(decoded) = decoded_opt {
+                let router = Rc::clone(&router);
+                let response_tx = Rc::clone(&response_tx);
+
+                glommio_ng::spawn_local_into(
+                    async move {
+                        match router.dispatch(decoded.req).await {
+                            Ok(cmd_result) => {
+                                let _ = response_tx.try_send(TcpCommandResult {
+                                    result: cmd_result,
+                                    req_id: decoded.req_id,
+                                });
+                                // TODO: handle send result error
+                            }
+                            Err(e) => {
+                                // TODO: handle error
+                            }
+                        }
+                    },
+                    task_queue,
+                )
+                .unwrap()
+                .detach();
             } else {
                 break; // connection closed
+            }
+        }
+    }
+
+    async fn writer_task(
+        mut write_half: WriteHalf<TcpStream<Preallocated>>,
+        response_rx: LocalReceiver<TcpCommandResult>,
+    ) {
+        let mut results = response_rx.stream();
+        while let Some(result) = results.next().await {
+            if let Err(e) = TcpCommandSender::send(&mut write_half, result).await {
+                // TODO: probably connection dead, handle it
+                break;
             }
         }
     }

@@ -1,4 +1,5 @@
 use crate::commands::errors::{GetError, RemoveError, SetError};
+use crate::commands::remove::RemoveCommand;
 use crate::commands::request::CommandRequest;
 use crate::commands::set::SetCommand;
 use crate::db_entry::{DbEntry, DbKey, DbValue};
@@ -54,7 +55,10 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             value: value.clone(),
         };
 
-        let req = CommandRequest::Set(SetCommand { key, value });
+        let req = match value {
+            DbValue::Value(_) => CommandRequest::Set(SetCommand { key, value }),
+            DbValue::Tombstone => CommandRequest::Remove(RemoveCommand { key }),
+        };
         self.wal.append(req).await.map_err(SetError::WalFailure)?;
 
         let entry = match self.mem_table.borrow_mut().set(entry) {

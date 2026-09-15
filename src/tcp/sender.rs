@@ -1,5 +1,6 @@
 use crate::db_entry::DbValue;
 use crate::shards::router::CommandResult;
+use crate::tcp::listener::TcpCommandResult;
 use futures::AsyncWriteExt;
 use futures::io::WriteHalf;
 use glommio_ng::GlommioError;
@@ -10,9 +11,10 @@ pub struct TcpCommandSender {}
 impl TcpCommandSender {
     pub async fn send(
         stream: &mut WriteHalf<TcpStream<Preallocated>>,
-        result: CommandResult,
+        result: TcpCommandResult,
     ) -> Result<(), GlommioError<()>> {
-        match result {
+        stream.write_all(&result.req_id.to_le_bytes()).await?; // Request id
+        match result.result {
             CommandResult::Ack => {
                 stream.write_all(&[0u8]).await?; // Ack - 0
             }

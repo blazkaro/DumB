@@ -8,14 +8,19 @@ use futures::AsyncReadExt;
 use futures::io::ReadHalf;
 use glommio_ng::net::{Preallocated, TcpStream};
 
+pub struct TcpDecodedCommand {
+    pub req_id: u16,
+    pub req: CommandRequest,
+}
+
 pub struct TcpCommandDecoder {}
 
-// Command structure: command type (1 byte), key len (4 bytes), key (x bytes)
+// Command structure: command type (1 byte), request id (2 bytes), key len (4 bytes), key (x bytes)
 // Then, depending on command type, there may be value len (4 bytes), value (y bytes)
 impl TcpCommandDecoder {
     pub async fn tcp_decode(
         stream: &mut ReadHalf<TcpStream<Preallocated>>,
-    ) -> Result<Option<CommandRequest>, CommandDecodingError> {
+    ) -> Result<Option<TcpDecodedCommand>, CommandDecodingError> {
         let mut command_type_bytes = [0u8; 1];
         match stream.read(&mut command_type_bytes).await {
             Ok(0) => return Ok(None),
@@ -25,6 +30,13 @@ impl TcpCommandDecoder {
         };
 
         let command_type = command_type_bytes[0];
+
+        let mut req_id_bytes = [0u8; 2];
+        stream
+            .read_exact(&mut req_id_bytes)
+            .await
+            .map_err(CommandDecodingError::Error)?;
+        let req_id = u16::from_le_bytes(req_id_bytes);
 
         let mut key_len_bytes = [0u8; 4];
         stream
@@ -54,13 +66,22 @@ impl TcpCommandDecoder {
                     .await
                     .map_err(CommandDecodingError::Error)?;
 
-                Ok(Some(CommandRequest::Set(SetCommand {
-                    key,
-                    value: DbValue::Value(value), // We assume client can't use SET to write Tombstone
-                })))
+                Ok(Some(TcpDecodedCommand {
+                    req: CommandRequest::Set(SetCommand {
+                        key,
+                        value: DbValue::Value(value), // We assume client can't use SET to write Tombstone
+                    }),
+                    req_id,
+                }))
             }
-            1 => Ok(Some(CommandRequest::Get(GetCommand { key }))),
-            2 => Ok(Some(CommandRequest::Remove(RemoveCommand { key }))),
+            1 => Ok(Some(TcpDecodedCommand {
+                req: CommandRequest::Get(GetCommand { key }),
+                req_id,
+            })),
+            2 => Ok(Some(TcpDecodedCommand {
+                req: CommandRequest::Remove(RemoveCommand { key }),
+                req_id,
+            })),
             _ => Err(CommandDecodingError::InvalidInput),
         }
     }

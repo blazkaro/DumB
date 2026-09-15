@@ -131,9 +131,9 @@ fn main() {
             let wal_path = shard_dir.join("wal");
             std::fs::create_dir_all(&wal_path).expect("Failed to create WAL directory");
 
-            let wal_mode = WalMode::Strict {
-                batch_window: Duration::from_millis(10000),
-                max_batch_size: 1024,
+            let wal_mode = WalMode::Relaxed {
+                batch_window: Duration::from_secs(10),
+                max_batch_size: 50_000,
             };
 
             let wal = Wal::init(
@@ -141,7 +141,7 @@ fn main() {
                 wal_mode,
                 &wal_path,
                 Rc::clone(&storage_config),
-                Shares::Static(300),
+                Shares::Static(315),
                 Latency::NotImportant,
             )
             .await
@@ -160,9 +160,7 @@ fn main() {
             Listener::listen(
                 cpu_shard_id,
                 shard_router,
-                Shares::Static(30),
-                Latency::NotImportant,
-                Shares::Static(300),
+                Shares::Static(315),
                 Latency::NotImportant,
             );
 

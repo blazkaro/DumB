@@ -12,7 +12,7 @@ use crate::ss_table::metadata::{SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::storage_config::StorageConfig;
 use crate::wal::log::Wal;
-use glommio_ng::io::DmaFile;
+use glommio_ng::io::OpenOptions;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -138,7 +138,10 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             .ss_tables_dir
             .join(format!("ss_table_{}_{}", self.cpu_shard_id, ss_table.id));
 
-        let file = DmaFile::open(&path)
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .dma_open(&path)
             .await
             .map_err(|e| GetError::OpenFailure(e.into()))?;
         let mut reader = SsTableReader::init(file, Rc::clone(&self.storage_config))

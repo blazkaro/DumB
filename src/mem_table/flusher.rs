@@ -15,7 +15,7 @@ use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
 use futures::StreamExt;
 use glommio_ng::channels::local_channel::{LocalReceiver, LocalSender};
-use glommio_ng::io::{Directory, DmaFile};
+use glommio_ng::io::{Directory, OpenOptions};
 use glommio_ng::{Latency, Shares};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -139,7 +139,10 @@ impl<MT: MemTable> MemTableFlusherInternal<MT> {
         let path = self
             .dir
             .join(format!("ss_table_{}_{}", self.cpu_shard_id, id));
-        let file = DmaFile::create(&path)
+        let file = OpenOptions::new()
+            .read(false)
+            .write(true)
+            .dma_open(path)
             .await
             .map_err(|e| FlushInternalError::CreateFileFailed(e.into()))?;
 

@@ -6,7 +6,7 @@ use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
-use glommio_ng::io::{Directory, DmaFile};
+use glommio_ng::io::{Directory, OpenOptions};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
@@ -238,7 +238,7 @@ impl SsTableMerger {
                 .dir
                 .join(format!("ss_table_{}_{}", self.cpu_shard_id, id));
 
-            let file = match DmaFile::open(&path).await {
+            let file = match OpenOptions::new().write(false).dma_open(path).await {
                 Ok(f) => f,
                 Err(e) => {
                     Self::cleanup_readers(readers).await;
@@ -297,7 +297,10 @@ impl SsTableMerger {
             .dir
             .join(format!("ss_table_{}_{}", self.cpu_shard_id, id));
 
-        let output_file = DmaFile::create(&path)
+        let output_file = OpenOptions::new()
+            .read(false)
+            .write(true)
+            .dma_open(path)
             .await
             .map_err(|e| MergeError::CreateError(e.into()))?;
 

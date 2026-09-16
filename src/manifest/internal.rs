@@ -2,7 +2,7 @@ use crate::manifest::entry::ManifestEntry;
 use crate::manifest::errors::{ManifestOpenError, ManifestWriteError};
 use crate::manifest::snapshot::ManifestSnapshot;
 use crate::ss_table::metadata::{SsTableId, SsTableLevel, SsTableMetadata};
-use glommio_ng::io::{BufferedFile, Directory};
+use glommio_ng::io::{BufferedFile, Directory, OpenOptions};
 use std::collections::{BTreeSet, HashMap};
 use std::io::ErrorKind;
 use std::path::Path;
@@ -118,7 +118,10 @@ impl ManifestInternal {
 
     async fn open(dir: &Path, cpu_shard_id: u32) -> Result<Self, ManifestOpenError> {
         let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
-        let file = BufferedFile::open(&path)
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .buffered_open(path)
             .await
             .map_err(|e| ManifestOpenError::Open(e.into()))?;
         let file_size = file
@@ -168,7 +171,10 @@ impl ManifestInternal {
     async fn create(dir: &Path, cpu_shard_id: u32) -> Result<Self, ManifestOpenError> {
         let path = dir.join(format!("{}_{}", Self::FILE_NAME, cpu_shard_id));
 
-        let file = BufferedFile::create(&path)
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .buffered_open(path)
             .await
             .map_err(|e| ManifestOpenError::Create(e.into()))?;
 

@@ -13,11 +13,8 @@
   <component name="ChangeListManager">
     <list default="true" id="9241af2b-a504-4561-bd65-20c79f4a252b" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/commands/handler.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/commands/handler.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/tcp/decoder.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/decoder.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/manifest/handler.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/manifest/handler.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/tcp/listener.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/listener.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/tcp/sender.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/tcp/sender.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

@@ -85,7 +85,7 @@ impl Listener {
 
         // The ONLY task that uses writer half. No concurrent calls on write-half.
         glommio_ng::spawn_local_into(Self::writer_task(write_half, response_rx), task_queue)
-            .unwrap()
+            .expect("failed to spawn tcp writer task onto its task queue (probably closed)")
             .detach();
 
         loop {
@@ -116,8 +116,8 @@ impl Listener {
                     },
                     task_queue,
                 )
-                .unwrap()
-                .detach();
+                    .expect("failed to spawn tcp command response handler task onto its task queue (probably closed)")
+                    .detach();
             } else {
                 break; // connection closed
             }

@@ -114,11 +114,10 @@ impl ManifestHandler {
     pub async fn add_ss_table(&self, metadata: SsTableMetadata) -> Result<(), ManifestWriteError> {
         let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
-            .send(ManifestCommand::AddSsTable {
+            .try_send(ManifestCommand::AddSsTable {
                 metadata,
                 reply: reply_tx,
             })
-            .await
             .expect("manifest actor task is no longer running");
 
         reply_rx
@@ -131,11 +130,10 @@ impl ManifestHandler {
     pub async fn remove_ss_table(&self, id: SsTableId) -> Result<(), ManifestWriteError> {
         let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
-            .send(ManifestCommand::RemoveSsTable {
+            .try_send(ManifestCommand::RemoveSsTable {
                 id,
                 reply: reply_tx,
             })
-            .await
             .expect("manifest actor task is no longer running");
 
         reply_rx
@@ -152,12 +150,11 @@ impl ManifestHandler {
     ) -> Result<(), ManifestWriteError> {
         let (reply_tx, reply_rx) = local_channel::new_bounded(1);
         self.sender
-            .send(ManifestCommand::Compaction {
+            .try_send(ManifestCommand::Compaction {
                 new_ss_tables,
                 old_ss_table_ids,
                 reply: reply_tx,
             })
-            .await
             .expect("manifest actor task is no longer running");
 
         reply_rx

@@ -73,8 +73,12 @@ impl SsTableWriter {
     }
 
     pub async fn finish(mut self) -> Result<(), SsTableWriteError> {
-        // Flush buffers to the OS/Storage Controller
-        // DURABILITY: As well, it does sync, so forces the storage drive to flush its hardware cache.
+        // DURABILITY: Sync
+        self.dma_writer
+            .sync()
+            .await
+            .map_err(|e| SsTableWriteError::DurabilityError(e.into()))?;
+
         self.dma_writer
             .close()
             .await

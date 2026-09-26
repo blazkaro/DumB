@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct StorageConfig {
     pub memory_table_bytes_max_size: u32,
     pub ss_table_flush_buffer_size_bytes: usize,
@@ -13,4 +14,7 @@ pub struct StorageConfig {
     pub ss_table_read_buffer_size: u32,
     pub ss_table_buffer_read_ahead: u32,
     pub avg_command_size_hint: u32,
+    pub wal_read_buffer_size: u32,
+    pub wal_buffer_read_ahead: u32,
+    pub wal_segments_pool_size: u32,
 }

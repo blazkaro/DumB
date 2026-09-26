@@ -238,7 +238,12 @@ impl SsTableMerger {
                 .dir
                 .join(format!("ss_table_{}_{}", self.cpu_shard_id, id));
 
-            let file = match OpenOptions::new().write(false).dma_open(path).await {
+            let file = match OpenOptions::new()
+                .read(true)
+                .write(false)
+                .dma_open(path)
+                .await
+            {
                 Ok(f) => f,
                 Err(e) => {
                     Self::cleanup_readers(readers).await;
@@ -300,6 +305,7 @@ impl SsTableMerger {
         let output_file = OpenOptions::new()
             .read(false)
             .write(true)
+            .create_new(true)
             .dma_open(path)
             .await
             .map_err(|e| MergeError::CreateError(e.into()))?;

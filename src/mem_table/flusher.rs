@@ -13,6 +13,9 @@ use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::ss_table::metadata::SsTableMetadata;
 use crate::ss_table::writer::SsTableWriter;
 use crate::storage_config::StorageConfig;
+use crate::wal::errors::WalReleaseError;
+use crate::wal::id_generator::WalId;
+use crate::wal::log::Wal;
 use futures::StreamExt;
 use glommio_ng::channels::local_channel::{LocalReceiver, LocalSender};
 use glommio_ng::io::{Directory, OpenOptions};
@@ -20,9 +23,14 @@ use glommio_ng::{Latency, Shares};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+struct FlushRequest<MT: MemTable> {
+    mem_table: Rc<MT>,
+    wal_id: WalId,
+}
+
 #[derive(Clone)]
 pub struct MemTableFlushHandler<MT: MemTable + 'static> {
-    sender: Rc<LocalSender<Rc<MT>>>,
+    sender: Rc<LocalSender<FlushRequest<MT>>>,
 }
 
 impl<MT: MemTable + 'static> MemTableFlushHandler<MT> {
@@ -32,8 +40,10 @@ impl<MT: MemTable + 'static> MemTableFlushHandler<MT> {
         storage_config: Rc<StorageConfig>,
         manifest: ManifestHandler,
         compaction_trigger: CompactionTrigger,
+        wal: Rc<Wal>,
         id_generator: Rc<SsTableIdGenerator>,
         retry_policy: RetryPolicy,
+        immutable_mem_tables: Rc<ImmutableMemTables<MT>>,
         shares: Shares,
         latency: Latency,
     ) -> Result<Self, FlushError> {
@@ -47,9 +57,10 @@ impl<MT: MemTable + 'static> MemTableFlushHandler<MT> {
             dir,
             manifest,
             compaction_trigger,
+            wal,
             parent,
             id_generator,
-            immutable_mem_tables: ImmutableMemTables::new(),
+            immutable_mem_tables,
             retry_policy,
         };
 
@@ -68,9 +79,9 @@ impl<MT: MemTable + 'static> MemTableFlushHandler<MT> {
         })
     }
 
-    pub fn flush(&self, mem_table: Rc<MT>) -> Result<(), FlushError> {
+    pub fn flush(&self, mem_table: Rc<MT>, wal_id: WalId) -> Result<(), FlushError> {
         self.sender
-            .try_send(mem_table)
+            .try_send(FlushRequest { mem_table, wal_id })
             .map_err(|e| match classify_glommio_error(e) {
                 ClassifiedError::ChannelClosed(_) => FlushError::FlusherGone,
                 _ => panic!("unexpected result sending to flush channel"),
@@ -85,6 +96,7 @@ enum FlushInternalError {
     DirectorySyncFailed(std::io::Error),
     ManifestRegistrationFailed(ManifestWriteError),
     CompactionTriggerFailed(CompactionTriggerError),
+    WalReleaseFailed(WalReleaseError),
 }
 
 impl RetryableError for FlushInternalError {
@@ -95,6 +107,7 @@ impl RetryableError for FlushInternalError {
             FlushInternalError::WriterFailure(e) => e.is_retryable(),
             FlushInternalError::ManifestRegistrationFailed(e) => e.is_retryable(),
             FlushInternalError::CompactionTriggerFailed(e) => e.is_retryable(),
+            FlushInternalError::WalReleaseFailed(e) => e.is_retryable(),
         }
     }
 }
@@ -105,35 +118,40 @@ struct MemTableFlusherInternal<MT: MemTable> {
     dir: PathBuf,
     manifest: ManifestHandler,
     compaction_trigger: CompactionTrigger,
+    wal: Rc<Wal>,
     parent: Directory,
     id_generator: Rc<SsTableIdGenerator>,
-    immutable_mem_tables: ImmutableMemTables<MT>,
+    immutable_mem_tables: Rc<ImmutableMemTables<MT>>,
     retry_policy: RetryPolicy,
 }
 
 impl<MT: MemTable> MemTableFlusherInternal<MT> {
-    async fn run(self, receiver: LocalReceiver<Rc<MT>>) {
+    async fn run(self, receiver: LocalReceiver<FlushRequest<MT>>) {
         let mut mem_tables = receiver.stream();
 
-        while let Some(mem_table) = mem_tables.next().await {
+        while let Some(flush_req) = mem_tables.next().await {
+            let (mem_table, wal_id) = (flush_req.mem_table, flush_req.wal_id);
             match retry_if(
                 &self.retry_policy,
-                async || self.flush(Rc::clone(&mem_table)).await,
+                async || self.flush(Rc::clone(&mem_table), wal_id).await,
                 |e| e.is_retryable(),
             )
             .await
             {
-                Ok(()) => self.immutable_mem_tables.pop(), // because both channel (local receiver) and immutable mem tables are FIFO, it removes currently processed mem table
+                Ok(()) => {
+                    self.immutable_mem_tables
+                        .pop()
+                        .expect("Immutable mem tables collection was empty during flush");
+                    // because both channel (local receiver) and immutable mem tables are FIFO, it removes currently processed mem table
+                }
                 Err(e) => {
-                    // Serious problem here: in memory data couldn't be durably saved, so we need something in order to not loss it forever
-                    // This happens because we don't have WAL yet
                     panic!("Flush failed permanently: {:?}", e);
                 }
             }
         }
     }
 
-    async fn flush(&self, mem_table: Rc<MT>) -> Result<(), FlushInternalError> {
+    async fn flush(&self, mem_table: Rc<MT>, wal_id: WalId) -> Result<(), FlushInternalError> {
         // ATOMICITY: we're not flushing to temp file, but we won't list this ss table in manifest unless completely saved
         let id = self.id_generator.next_id();
         let path = self
@@ -142,6 +160,7 @@ impl<MT: MemTable> MemTableFlusherInternal<MT> {
         let file = OpenOptions::new()
             .read(false)
             .write(true)
+            .create_new(true)
             .dma_open(path)
             .await
             .map_err(|e| FlushInternalError::CreateFileFailed(e.into()))?;
@@ -185,6 +204,12 @@ impl<MT: MemTable> MemTableFlusherInternal<MT> {
         self.compaction_trigger
             .notify()
             .map_err(FlushInternalError::CompactionTriggerFailed)?;
+
+        // WAL no longer needed - data is durable.
+        self.wal
+            .free_up(wal_id)
+            .await
+            .map_err(FlushInternalError::WalReleaseFailed)?;
 
         Ok(())
     }

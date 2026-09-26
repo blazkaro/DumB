@@ -174,6 +174,7 @@ impl ManifestInternal {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .create_new(true)
             .buffered_open(path)
             .await
             .map_err(|e| ManifestOpenError::Create(e.into()))?;

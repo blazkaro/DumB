@@ -4,18 +4,23 @@ use crate::compaction::trigger::CompactionTrigger;
 use crate::manifest::handler::ManifestHandler;
 use crate::mem_table::btree_mem_table::BTreeMemTable;
 use crate::mem_table::flusher::MemTableFlushHandler;
+use crate::mem_table::immutable::ImmutableMemTables;
+use crate::mem_table::mem_table::MemTable;
 use crate::retries::retry::RetryPolicy;
 use crate::shards::router::ShardRouter;
 use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::storage_config::StorageConfig;
 use crate::tcp::listener::Listener;
+use crate::wal::id_generator::{OrderedWalId, WalIdGenerator};
 use crate::wal::log::Wal;
 use crate::wal::mode::WalMode;
+use crate::wal::recovery::{WalRecoveredState, WalRecovery};
+use futures::future::pending;
 use glommio_ng::{CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, Shares};
-use std::future::pending;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
+use crate::wal::writer::WalWriter;
 
 pub mod commands;
 pub mod compaction;
@@ -70,9 +75,67 @@ fn main() {
                 ss_table_read_buffer_size: 128 * 1024,       // 128KB,
                 ss_table_buffer_read_ahead: 2,
 
+                // Internal WAL config
+                wal_read_buffer_size: 128 * 1024,
+                wal_buffer_read_ahead: 2,
+                wal_segments_pool_size: 16,
+
                 // Buffer hints
                 avg_command_size_hint: 196,
             });
+
+            // TODO: configurable mode
+            let wal_dir = shard_dir.join("wal");
+            std::fs::create_dir_all(&wal_dir).expect("Failed to create WAL directory");
+
+            let wal_recovery =
+                WalRecovery::new(cpu_shard_id, wal_dir.clone(), Rc::clone(&storage_config));
+
+            // Only BTreeMemTable supported right now
+            let recovered_state = wal_recovery
+                .recover::<BTreeMemTable>()
+                .await
+                .expect("Failed to recover pre-failure state");
+
+            let recovered_state = if let Some(state) = recovered_state {
+                state
+            } else {
+                WalRecoveredState {
+                    active_mem_table: (
+                        BTreeMemTable::new(Rc::clone(&storage_config)),
+                        OrderedWalId {
+                            wal_id: 0,
+                            order: 0,
+                        },
+                    ),
+                    ordered_immutable_mem_tables: Vec::new(),
+                    id_generator: WalIdGenerator::new(
+                        &Vec::new(),
+                        1,
+                        storage_config.wal_segments_pool_size as u64,
+                    ),
+                }
+            };
+
+            let wal_mode = WalMode::Relaxed {
+                batch_window: Duration::from_secs(10),
+                max_batch_size: 50_000,
+            };
+
+            let wal = Wal::init(
+                cpu_shard_id,
+                wal_mode,
+                wal_dir,
+                recovered_state.id_generator,
+                recovered_state.active_mem_table.1,
+                Rc::clone(&storage_config),
+                Shares::Static(315),
+                Latency::NotImportant,
+            )
+            .await
+            .expect("Failed to create WAL");
+
+            let wal = Rc::new(wal);
 
             let ss_tables_dir = shard_dir.join("ss");
             std::fs::create_dir_all(&ss_tables_dir).expect("Failed to create SS Tables dir");
@@ -90,6 +153,12 @@ fn main() {
             .await
             .expect("Failed to open or create manifest");
 
+            // Shared between command handler and flusher
+            let immutable_mem_tables = ImmutableMemTables::new();
+            for (mt, _) in recovered_state.ordered_immutable_mem_tables.iter() {
+                immutable_mem_tables.push(Rc::clone(mt));
+            }
+
             let (compaction_trigger, compaction_receiver) = CompactionTrigger::new();
             let flusher = MemTableFlushHandler::<BTreeMemTable>::new(
                 ss_tables_dir.clone(),
@@ -97,12 +166,14 @@ fn main() {
                 Rc::clone(&storage_config),
                 manifest.clone(),
                 compaction_trigger,
+                Rc::clone(&wal),
                 Rc::clone(&ss_table_id_generator),
                 RetryPolicy {
                     max_attempts: 5,
                     base_delay: Duration::from_millis(100),
                     max_delay: Duration::from_millis(5000),
                 },
+                Rc::clone(&immutable_mem_tables),
                 Shares::Static(120),
                 Latency::NotImportant,
             )
@@ -127,31 +198,21 @@ fn main() {
 
             compactor.spawn(Shares::Static(50), Latency::NotImportant);
 
-            // TODO: configurable mode
-            let wal_path = shard_dir.join("wal");
-            std::fs::create_dir_all(&wal_path).expect("Failed to create WAL directory");
-
-            let wal_mode = WalMode::Relaxed {
-                batch_window: Duration::from_secs(10),
-                max_batch_size: 50_000,
-            };
-
-            let wal = Wal::init(
-                cpu_shard_id,
-                wal_mode,
-                &wal_path,
-                Rc::clone(&storage_config),
-                Shares::Static(315),
-                Latency::NotImportant,
-            )
-            .await
-            .expect("Failed to create WAL");
+            // Before listening starts, flush recovered state
+            for idx in 0..recovered_state.ordered_immutable_mem_tables.len() {
+                let (mt, id) = &recovered_state.ordered_immutable_mem_tables[idx];
+                flusher
+                    .flush(Rc::clone(mt), id.wal_id)
+                    .expect("Failed triggering flush on recovered mem table");
+            }
 
             let command_handler = CommandHandler::new(
                 flusher,
                 manifest.clone(),
                 wal,
                 ss_tables_dir.clone(),
+                recovered_state.active_mem_table.0,
+                Rc::clone(&immutable_mem_tables),
                 cpu_shard_id,
                 Rc::clone(&storage_config),
             );

@@ -5,9 +5,10 @@ use crate::commands::set::SetCommand;
 use crate::db_entry::{DbEntry, DbKey, DbValue};
 use crate::manifest::handler::ManifestHandler;
 use crate::manifest::snapshot_lookup::SnapshotLookup;
+use crate::mem_table::errors::MemTablePreallocationError;
 use crate::mem_table::flusher::MemTableFlushHandler;
 use crate::mem_table::immutable::ImmutableMemTables;
-use crate::mem_table::mem_table::{MemTable, MemTableError};
+use crate::mem_table::mem_table::MemTable;
 use crate::ss_table::metadata::{SsTableLevel, SsTableMetadata};
 use crate::ss_table::reader::SsTableReader;
 use crate::storage_config::StorageConfig;
@@ -17,13 +18,19 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+struct WaitingMemTable<MT: MemTable> {
+    mem_table: Rc<MT>,
+    sync_id: u32,
+}
+
 pub struct CommandHandler<MT: MemTable + 'static> {
-    mem_table: Rc<RefCell<MT>>, // NEVER HELD MID-AWAIT
+    mem_table: RefCell<Rc<RefCell<MT>>>,
+    gate: RefCell<Option<glommio_ng::sync::Gate>>,
     mem_table_flusher: MemTableFlushHandler<MT>,
     storage_config: Rc<StorageConfig>,
-    immutable_mem_tables: ImmutableMemTables<MT>,
+    immutable_mem_tables: Rc<ImmutableMemTables<MT>>,
     manifest: ManifestHandler,
-    wal: Wal,
+    wal: Rc<Wal>,
     ss_tables_dir: PathBuf,
     cpu_shard_id: u32,
 }
@@ -32,16 +39,19 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
     pub fn new(
         flusher: MemTableFlushHandler<MT>,
         manifest: ManifestHandler,
-        wal: Wal,
+        wal: Rc<Wal>,
         ss_tables_dir: PathBuf,
+        active_mem_table: MT,
+        immutable_mem_tables: Rc<ImmutableMemTables<MT>>,
         cpu_shard_id: u32,
         storage_config: Rc<StorageConfig>,
     ) -> Self {
         Self {
-            mem_table: Rc::new(RefCell::new(MT::new(Rc::clone(&storage_config)))),
+            mem_table: RefCell::new(Rc::new(RefCell::new(active_mem_table))),
+            gate: RefCell::new(Some(glommio_ng::sync::Gate::new())),
             mem_table_flusher: flusher,
             storage_config: Rc::clone(&storage_config),
-            immutable_mem_tables: ImmutableMemTables::<MT>::new(),
+            immutable_mem_tables,
             manifest,
             wal,
             ss_tables_dir,
@@ -55,34 +65,112 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             value: value.clone(),
         };
 
-        let req = match value {
+        let (mem_table, pass) = loop {
+            // Take clone for this attempt
+            let mem_table = Rc::clone(&self.mem_table.borrow());
+
+            let preallocation = mem_table.borrow_mut().preallocate(&entry);
+            match preallocation {
+                Ok(()) => {
+                    // pre-allocated, fine
+                    // current gate still belongs to this mem table, no await between here and preallocation
+                    let pass = self
+                        .gate
+                        .borrow()
+                        .as_ref()
+                        .expect("Gate must always be present")
+                        .enter()
+                        .expect("Gate was closed, although it has to be always open");
+
+                    break (mem_table, pass);
+                }
+                Err(MemTablePreallocationError::SizeExceeded) => {
+                    // rotate
+
+                    let taken = self.gate.borrow_mut().take();
+                    match taken {
+                        Some(prev_gate) => {
+                            // We are the only task that will rotate
+
+                            // Rotate immediately for future calls. WAL uses actor loop so ordering is preserved
+                            let prev_wal_id =
+                                match self.wal.rotate().map_err(SetError::WalRotationFailure) {
+                                    Ok(id) => id,
+                                    Err(e) => {
+                                        // Restore the previous, valid state
+                                        *self.gate.borrow_mut() = Some(prev_gate);
+                                        return Err(e);
+                                    }
+                                };
+
+                            // Swap both mem table and gate synchronously, no window for invalid state
+                            let full = std::mem::replace(
+                                &mut *self.mem_table.borrow_mut(),
+                                Rc::new(RefCell::new(MT::new(Rc::clone(&self.storage_config)))),
+                            );
+                            *self.gate.borrow_mut() = Some(glommio_ng::sync::Gate::new());
+
+                            // we don't need that clone anymore
+                            // don't keep untracked Rc while draining
+                            drop(mem_table);
+
+                            // Drain in flight commands against old mem table.
+                            // We can do it after rotation, because we took clone of old mem table in the beginning
+                            // Also, we have to do it after rotation, because future calls need to have new gate, mem table etc. immediately, without waiting for drain
+                            // (or panicking without proper, lock-like handling)
+                            prev_gate.close().await.ok();
+
+                            // Drained, no task is holding that old mem table right now, so we can convert into inner
+                            let full = Rc::into_inner(full).expect("Mem table was still being processed by some task despite draining in flight commands");
+                            let full = Rc::new(full.into_inner());
+
+                            self.immutable_mem_tables.push(Rc::clone(&full));
+                            self.mem_table_flusher
+                                .flush(full, prev_wal_id)
+                                .map_err(SetError::FlusherFailure)?;
+
+                            // Loop back and retry
+                        }
+                        None => {
+                            // don't keep Rc while yielding
+                            drop(mem_table);
+                            glommio_ng::executor().yield_now().await;
+                            // Loop back and retry
+                        }
+                    }
+                }
+            }
+        };
+
+        let req = match &value {
             DbValue::Value(_) => CommandRequest::Set(SetCommand { key, value }),
             DbValue::Tombstone => CommandRequest::Remove(RemoveCommand { key }),
         };
-        self.wal.append(req).await.map_err(SetError::WalFailure)?;
+        let append_result = self.wal.append(req).await.map_err(SetError::WalFailure);
 
-        let entry = match self.mem_table.borrow_mut().set(entry) {
-            Ok(()) => return Ok(()),
-            Err(MemTableError::SizeExceeded(entry)) => entry,
-        };
+        if let Ok(_) = append_result {
+            mem_table
+                .borrow_mut()
+                .set(entry, true)
+                .expect("mem table exceeded size despite pre-allocation");
+        }
 
-        let full = Rc::new({
-            let mut guard = self.mem_table.borrow_mut();
-            std::mem::replace(&mut *guard, MT::new(Rc::clone(&self.storage_config)))
-        });
+        // If it's last pass, gate is going to be immediately informed that draining has ended
+        // Depending on how tasks are scheduled, it may be before we drop Rc to mem_table, and we would get panic that some Rc to mem tables are still alive
+        // To prevent this, just drop cloned mem table before pass
+        drop(mem_table);
+        drop(pass);
 
-        self.immutable_mem_tables.push(Rc::clone(&full));
-        self.mem_table_flusher
-            .flush(full)
-            .map_err(SetError::FlusherFailure)?;
-
-        let _ = self.mem_table.borrow_mut().set(entry); // fresh mem table isn't going to overflow
+        // Now, return error if it happened (after dropping mem table and pass)
+        if append_result.is_err() {
+            return append_result;
+        }
 
         Ok(())
     }
 
     pub async fn get(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GetError> {
-        if let Some(value) = self.mem_table.borrow().get(key) {
+        if let Some(value) = self.mem_table.borrow().borrow().get(key) {
             return Ok(Some(value));
         }
 

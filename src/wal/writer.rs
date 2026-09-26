@@ -2,6 +2,7 @@ use crate::commands::request::CommandRequest;
 use crate::db_entry::DbValue;
 use crate::storage_config::StorageConfig;
 use crate::wal::errors::WalWriterError;
+use crate::wal::id_generator::OrderedWalId;
 use crate::wal::mode::WalMode;
 use futures::AsyncWriteExt;
 use glommio_ng::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
@@ -14,8 +15,12 @@ pub struct WalWriter {
 }
 
 impl WalWriter {
-    pub async fn init(
+    pub const ENTRY_START_HEADER: u32 = 0x52544E45;
+
+    pub async fn open(
         path: &Path,
+        id: Rc<OrderedWalId>,
+        append: bool,
         wal_mode: Rc<WalMode>,
         storage_config: Rc<StorageConfig>,
     ) -> Result<WalWriter, WalWriterError> {
@@ -31,15 +36,31 @@ impl WalWriter {
 
         let file = OpenOptions::new()
             .write(true)
-            .append(true)
+            .append(append)
+            .truncate(!append)
+            .create(false)
+            .create_new(false)
             .dma_open(path)
             .await
             .map_err(|e| WalWriterError::OpenFailed(e.into()))?;
 
-        let dma_writer = DmaStreamWriterBuilder::new(file)
+        let file_size = file
+            .file_size()
+            .await
+            .map_err(|e| WalWriterError::OpenFailed(e.into()))?;
+
+        let mut dma_writer = DmaStreamWriterBuilder::new(file)
             .with_buffer_size(buffer_size as usize)
             .with_write_behind(writes_behind as usize)
             .build();
+
+        // if we overwrite (or caller want to overwrite empty file)
+        if !append || file_size == 0 {
+            dma_writer
+                .write_all(&id.order.to_le_bytes())
+                .await
+                .expect("Could not preserve WAL ordering");
+        }
 
         Ok(Self {
             dma_writer,
@@ -48,6 +69,12 @@ impl WalWriter {
     }
 
     pub async fn append(&mut self, request: &CommandRequest) -> Result<(), WalWriterError> {
+        // Needed because random, e.g. through deadline fsync may happen and padding will break reads
+        self.dma_writer
+            .write_all(&Self::ENTRY_START_HEADER.to_le_bytes())
+            .await
+            .map_err(|e| WalWriterError::WriteFailed(e.into()))?;
+
         match request {
             CommandRequest::Get(_) => panic!("WAL only stores mutating operations"),
             CommandRequest::Set(cmd) => {
@@ -106,7 +133,7 @@ impl WalWriter {
 
     pub async fn fsync(&self) -> Result<(), WalWriterError> {
         self.dma_writer
-            .sync()
+            .sync_aligned()
             .await
             .map_err(|e| WalWriterError::DurabilityError(e.into()))?;
 

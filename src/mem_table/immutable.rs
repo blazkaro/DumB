@@ -7,24 +7,23 @@ use std::rc::Rc;
 /// Mem tables that have been rotated out of "active" but aren't yet
 /// durably represented in the manifest. Shared between the rotation
 /// path (pushes), the flusher (pops on success), and reads (scans).
-#[derive(Clone)]
 pub struct ImmutableMemTables<MT: MemTable> {
-    inner: Rc<RefCell<VecDeque<Rc<MT>>>>,
+    inner: RefCell<VecDeque<Rc<MT>>>,
 }
 
 impl<MT: MemTable> ImmutableMemTables<MT> {
-    pub fn new() -> Self {
-        Self {
-            inner: Rc::new(RefCell::new(VecDeque::new())),
-        }
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self {
+            inner: RefCell::new(VecDeque::new()),
+        })
     }
 
     pub fn push(&self, mem_table: Rc<MT>) {
         self.inner.borrow_mut().push_back(mem_table);
     }
 
-    pub fn pop(&self) {
-        self.inner.borrow_mut().pop_front();
+    pub fn pop(&self) -> Option<Rc<MT>> {
+        self.inner.borrow_mut().pop_front()
     }
 
     pub fn get(&self, key: &DbKey) -> Option<Rc<DbValue>> {

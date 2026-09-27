@@ -14,8 +14,8 @@ impl RetryableError for ManifestOpenError {
         match self {
             ManifestOpenError::Open(e)
             | ManifestOpenError::Create(e)
-            | ManifestOpenError::Read(e)
-            | ManifestOpenError::DirMetadataSync(e) => is_io_error_transient(e),
+            | ManifestOpenError::Read(e) => is_io_error_transient(e),
+            ManifestOpenError::DirMetadataSync(e) => false,
         }
     }
 }
@@ -35,9 +35,8 @@ pub enum ManifestWriteError {
 impl RetryableError for ManifestWriteError {
     fn is_retryable(&self) -> bool {
         match self {
-            ManifestWriteError::WriteFailed(e) | ManifestWriteError::NotDurable(e) => {
-                is_io_error_transient(e)
-            }
+            ManifestWriteError::WriteFailed(e) => is_io_error_transient(e),
+            ManifestWriteError::NotDurable(e) => false,
             ManifestWriteError::IncompleteWrite => true,
             ManifestWriteError::ActorGone => false,
         }

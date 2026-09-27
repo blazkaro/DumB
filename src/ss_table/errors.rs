@@ -10,9 +10,10 @@ pub enum SsTableWriteError {
 impl RetryableError for SsTableWriteError {
     fn is_retryable(&self) -> bool {
         match self {
-            SsTableWriteError::InitFailed(e)
-            | SsTableWriteError::WriteFailed(e)
-            | SsTableWriteError::DurabilityError(e) => is_io_error_transient(e),
+            SsTableWriteError::InitFailed(e) | SsTableWriteError::WriteFailed(e) => {
+                is_io_error_transient(e)
+            }
+            SsTableWriteError::DurabilityError(e) => false,
         }
     }
 }

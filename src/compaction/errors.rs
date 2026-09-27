@@ -34,12 +34,11 @@ pub enum MergeError {
 impl RetryableError for MergeError {
     fn is_retryable(&self) -> bool {
         match self {
-            MergeError::OpenError(e)
-            | MergeError::CreateError(e)
-            | MergeError::DirMetadataSync(e) => is_io_error_transient(e),
+            MergeError::OpenError(e) | MergeError::CreateError(e) => is_io_error_transient(e),
             MergeError::ReaderError(e) => e.is_retryable(),
             MergeError::WriterError(e) => e.is_retryable(),
             MergeError::ManifestRegistrationFailure(e) => e.is_retryable(),
+            MergeError::DirMetadataSync(e) => false,
         }
     }
 }

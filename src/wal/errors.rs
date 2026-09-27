@@ -16,9 +16,10 @@ pub enum WalWriterError {
 impl RetryableError for WalWriterError {
     fn is_retryable(&self) -> bool {
         match self {
-            WalWriterError::OpenFailed(e)
-            | WalWriterError::WriteFailed(e)
-            | WalWriterError::DurabilityError(e) => is_io_error_transient(e),
+            WalWriterError::OpenFailed(e) | WalWriterError::WriteFailed(e) => {
+                is_io_error_transient(e)
+            }
+            WalWriterError::DurabilityError(e) => false,
         }
     }
 }
@@ -87,9 +88,7 @@ pub enum WalReleaseError {
 impl RetryableError for WalReleaseError {
     fn is_retryable(&self) -> bool {
         match self {
-            WalReleaseError::TruncationFailed(e) => {
-                is_io_error_transient(e)
-            }
+            WalReleaseError::TruncationFailed(e) => is_io_error_transient(e),
             WalReleaseError::DurabilityError(_) => false,
         }
     }

@@ -94,7 +94,7 @@ impl SsTableCompactor {
                             let target_size = self.storage_config.ss_table_level_1_target_size_bytes
                                 as u64
                                 * (self.storage_config.ss_table_level_growth_factor as u64)
-                                    .pow(level as u32);
+                                    .pow((level - 1) as u32);
 
                             let score = snapshot.get_level_size(level) as f32 / target_size as f32;
                             (level, score)

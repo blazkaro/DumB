@@ -33,3 +33,8 @@ impl RetryableError for SsTableReadError {
         }
     }
 }
+
+#[derive(Debug)]
+pub enum SsTableIdGeneratorError{
+    SsTablesListingFailed(std::io::Error),
+}

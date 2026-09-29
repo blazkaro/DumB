@@ -130,7 +130,11 @@ fn main() {
 
             let ss_tables_dir = shard_dir.join("ss");
             std::fs::create_dir_all(&ss_tables_dir).expect("Failed to create SS Tables dir");
-            let ss_table_id_generator: Rc<SsTableIdGenerator> = Rc::new(SsTableIdGenerator::new());
+            let ss_table_id_generator: Rc<SsTableIdGenerator> = Rc::new(
+                SsTableIdGenerator::init(&ss_tables_dir, cpu_shard_id)
+                    .await
+                    .expect("Could not initialize ss table id generator"),
+            );
 
             let manifest_path = shard_dir.join("manifest");
             std::fs::create_dir_all(&manifest_path).expect("Failed to create Manifest dir");

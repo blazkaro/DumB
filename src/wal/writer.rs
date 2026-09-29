@@ -1,29 +1,26 @@
 use crate::commands::request::CommandRequest;
 use crate::db_entry::DbValue;
+use crate::safe_io::errors::SafeIoInitError;
+use crate::safe_io::writer::SafeWriter;
 use crate::storage_config::StorageConfig;
 use crate::wal::errors::WalWriterError;
 use crate::wal::id_generator::OrderedWalId;
 use crate::wal::mode::WalMode;
-use futures::AsyncWriteExt;
-use glommio_ng::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
 use std::path::Path;
 use std::rc::Rc;
 
 pub struct WalWriter {
-    dma_writer: DmaStreamWriter,
+    writer: SafeWriter,
     storage_config: Rc<StorageConfig>,
 }
 
 impl WalWriter {
-    pub const ENTRY_START_HEADER: u32 = 0x52544E45;
-
-    pub async fn open(
+    pub async fn open_and_truncate(
         path: &Path,
         id: Rc<OrderedWalId>,
-        append: bool,
         wal_mode: Rc<WalMode>,
         storage_config: Rc<StorageConfig>,
-    ) -> Result<WalWriter, WalWriterError> {
+    ) -> Result<WalWriter, SafeIoInitError> {
         let max_batch_size = match wal_mode.as_ref() {
             WalMode::Strict { max_batch_size, .. } | WalMode::Relaxed { max_batch_size, .. } => {
                 *max_batch_size as u32
@@ -34,97 +31,46 @@ impl WalWriter {
         let buffer_size = max_batch_size * avg_entry_size;
         let writes_behind = max_batch_size.max(64); // at least one full batch
 
-        let file = OpenOptions::new()
-            .write(true)
-            .append(append)
-            .truncate(!append)
-            .create(false)
-            .create_new(false)
-            .dma_open(path)
+        let mut writer =
+            SafeWriter::init(path, buffer_size as usize, writes_behind as usize, true).await?;
+
+        writer
+            .write_record(&[&id.order.to_le_bytes()])
             .await
-            .map_err(|e| WalWriterError::OpenFailed(e.into()))?;
-
-        let file_size = file
-            .file_size()
-            .await
-            .map_err(|e| WalWriterError::OpenFailed(e.into()))?;
-
-        let mut dma_writer = DmaStreamWriterBuilder::new(file)
-            .with_buffer_size(buffer_size as usize)
-            .with_write_behind(writes_behind as usize)
-            .build();
-
-        // if we overwrite (or caller want to overwrite empty file)
-        if !append || file_size == 0 {
-            dma_writer
-                .write_all(&id.order.to_le_bytes())
-                .await
-                .expect("Could not preserve WAL ordering");
-        }
+            .expect("Could not preserve WAL ordering");
 
         Ok(Self {
-            dma_writer,
+            writer,
             storage_config,
         })
     }
 
     pub async fn append(&mut self, request: &CommandRequest) -> Result<(), WalWriterError> {
-        // Needed because random, e.g. through deadline fsync may happen and padding will break reads
-        self.dma_writer
-            .write_all(&Self::ENTRY_START_HEADER.to_le_bytes())
-            .await
-            .map_err(|e| WalWriterError::WriteFailed(e.into()))?;
-
         match request {
             CommandRequest::Get(_) => panic!("WAL only stores mutating operations"),
             CommandRequest::Set(cmd) => {
-                self.dma_writer
-                    .write_all(&0u8.to_le_bytes())
-                    .await
-                    .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Command type - set - 0
-
-                self.dma_writer
-                    .write_all(&(cmd.key.len() as u32).to_le_bytes())
-                    .await
-                    .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Key length
-
-                self.dma_writer
-                    .write_all(&cmd.key)
-                    .await
-                    .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Key
+                let command_type = [0u8];
+                let key_len = (cmd.key.len() as u32).to_le_bytes();
 
                 match &cmd.value {
-                    DbValue::Value(bytes) => {
-                        self.dma_writer
-                            .write_all(&(bytes.len() as u32).to_le_bytes())
+                    DbValue::Value(value) => {
+                        let value_len = (value.len() as u32).to_le_bytes();
+                        self.writer
+                            .write_record(&[&command_type, &key_len, &cmd.key, &value_len, value])
                             .await
-                            .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Value len
-
-                        self.dma_writer
-                            .write_all(bytes)
-                            .await
-                            .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Value
+                            .map_err(WalWriterError::WriteFailed)?;
                     }
-                    DbValue::Tombstone => panic!(
-                        "SET cannot be used by clients to write Tombstone. Server-side validation/processing failed somewhere"
-                    ),
+                    DbValue::Tombstone => panic!("SET cannot be used write Tombstone"),
                 }
             }
             CommandRequest::Remove(cmd) => {
-                self.dma_writer
-                    .write_all(&1u8.to_le_bytes())
-                    .await
-                    .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Command type - remove - 1
+                let command_type = [1u8];
+                let key_len = (cmd.key.len() as u32).to_le_bytes();
 
-                self.dma_writer
-                    .write_all(&(cmd.key.len() as u32).to_le_bytes())
+                self.writer
+                    .write_record(&[&command_type, &key_len, &cmd.key])
                     .await
-                    .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Key length
-
-                self.dma_writer
-                    .write_all(&cmd.key)
-                    .await
-                    .map_err(|e| WalWriterError::WriteFailed(e.into()))?; // Key
+                    .map_err(WalWriterError::WriteFailed)?;
             }
         };
 
@@ -132,16 +78,16 @@ impl WalWriter {
     }
 
     pub async fn fsync(&self) -> Result<(), WalWriterError> {
-        self.dma_writer
-            .sync_aligned()
+        self.writer
+            .fsync()
             .await
             .map_err(|e| WalWriterError::DurabilityError(e.into()))?;
 
         Ok(())
     }
 
-    pub async fn finish(&mut self) -> Result<(), WalWriterError> {
-        self.dma_writer
+    pub async fn finish(self) -> Result<(), WalWriterError> {
+        self.writer
             .close()
             .await
             .map_err(WalWriterError::DurabilityError)?;

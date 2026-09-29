@@ -41,13 +41,12 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
         manifest: ManifestHandler,
         wal: Rc<Wal>,
         ss_tables_dir: PathBuf,
-        active_mem_table: MT,
         immutable_mem_tables: Rc<ImmutableMemTables<MT>>,
         cpu_shard_id: u32,
         storage_config: Rc<StorageConfig>,
     ) -> Self {
         Self {
-            mem_table: RefCell::new(Rc::new(RefCell::new(active_mem_table))),
+            mem_table: RefCell::new(Rc::new(RefCell::new(MT::new(Rc::clone(&storage_config))))),
             gate: RefCell::new(Some(glommio_ng::sync::Gate::new())),
             mem_table_flusher: flusher,
             storage_config: Rc::clone(&storage_config),

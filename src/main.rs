@@ -5,13 +5,12 @@ use crate::manifest::handler::ManifestHandler;
 use crate::mem_table::btree_mem_table::BTreeMemTable;
 use crate::mem_table::flusher::MemTableFlushHandler;
 use crate::mem_table::immutable::ImmutableMemTables;
-use crate::mem_table::mem_table::MemTable;
 use crate::retries::retry::RetryPolicy;
 use crate::shards::router::ShardRouter;
 use crate::ss_table::id_generator::SsTableIdGenerator;
 use crate::storage_config::StorageConfig;
 use crate::tcp::listener::Listener;
-use crate::wal::id_generator::{OrderedWalId, WalIdGenerator};
+use crate::wal::id_generator::WalIdGenerator;
 use crate::wal::log::Wal;
 use crate::wal::mode::WalMode;
 use crate::wal::recovery::{WalRecoveredState, WalRecovery};
@@ -20,7 +19,6 @@ use glommio_ng::{CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, Share
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
-use crate::wal::writer::WalWriter;
 
 pub mod commands;
 pub mod compaction;
@@ -30,6 +28,7 @@ pub mod le_reader;
 pub mod manifest;
 pub mod mem_table;
 pub mod retries;
+pub mod safe_io;
 pub mod shards;
 pub mod ss_table;
 pub mod storage_config;
@@ -101,17 +100,10 @@ fn main() {
                 state
             } else {
                 WalRecoveredState {
-                    active_mem_table: (
-                        BTreeMemTable::new(Rc::clone(&storage_config)),
-                        OrderedWalId {
-                            wal_id: 0,
-                            order: 0,
-                        },
-                    ),
                     ordered_immutable_mem_tables: Vec::new(),
                     id_generator: WalIdGenerator::new(
                         &Vec::new(),
-                        1,
+                        0,
                         storage_config.wal_segments_pool_size as u64,
                     ),
                 }
@@ -127,7 +119,6 @@ fn main() {
                 wal_mode,
                 wal_dir,
                 recovered_state.id_generator,
-                recovered_state.active_mem_table.1,
                 Rc::clone(&storage_config),
                 Shares::Static(315),
                 Latency::NotImportant,
@@ -211,7 +202,6 @@ fn main() {
                 manifest.clone(),
                 wal,
                 ss_tables_dir.clone(),
-                recovered_state.active_mem_table.0,
                 Rc::clone(&immutable_mem_tables),
                 cpu_shard_id,
                 Rc::clone(&storage_config),

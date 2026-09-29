@@ -1,5 +1,6 @@
 use crate::commands::errors::{RemoveError, SetError};
 use crate::errors::retryable::{RetryableError, is_io_error_transient};
+use crate::safe_io::errors::{SafeIoInitError, SafeReadError};
 
 #[derive(Debug)]
 pub enum WalWriterError {
@@ -27,18 +28,17 @@ impl RetryableError for WalWriterError {
 #[derive(Debug)]
 pub enum WalReaderError {
     /// Could not open WAL file
-    OpenFailed(std::io::Error),
+    InitFailed(SafeIoInitError),
 
     /// Could not read from WAL
-    ReadFailed(std::io::Error),
+    ReadFailed(SafeReadError),
 }
 
 impl RetryableError for WalReaderError {
     fn is_retryable(&self) -> bool {
         match self {
-            WalReaderError::OpenFailed(e) | WalReaderError::ReadFailed(e) => {
-                is_io_error_transient(e)
-            }
+            WalReaderError::InitFailed(e) => e.is_retryable(),
+            WalReaderError::ReadFailed(e) => e.is_retryable(),
         }
     }
 }

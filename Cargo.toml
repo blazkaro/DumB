@@ -9,3 +9,4 @@ glommio-ng = "0.12.0"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 rand = "0.10.2"
 log = "0.4.34"
+crc32c = "0.6.8"

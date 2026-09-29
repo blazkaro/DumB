@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 pub struct WalRecoveredState<MT: MemTable> {
-    pub active_mem_table: (MT, OrderedWalId),
     pub ordered_immutable_mem_tables: Vec<(Rc<MT>, OrderedWalId)>,
     pub id_generator: WalIdGenerator,
 }
@@ -44,7 +43,7 @@ impl WalRecovery {
         for (wal_id, wal_path) in segments {
             in_use_ids.push(wal_id);
 
-            let mut reader = WalReader::init(&wal_path, Rc::clone(&self.storage_config))
+            let mut reader = WalReader::init(wal_path, Rc::clone(&self.storage_config))
                 .await
                 .map_err(WalRecoveringError::ReaderFailed)?;
 
@@ -83,8 +82,8 @@ impl WalRecovery {
         }
 
         mem_tables.sort_by_key(|(_, id)| id.order); // sort by order - the greater, the newer the element
-        let active_mem_table = mem_tables.pop().unwrap(); // won't panic, already checked if len > 0
-        let next_free_order = &active_mem_table.1.order + 1;
+        let newest_mem_table = mem_tables.last().unwrap(); // won't panic, already checked if len > 0
+        let next_free_order = &newest_mem_table.1.order + 1;
 
         let id_generator = WalIdGenerator::new(
             &in_use_ids,
@@ -93,10 +92,6 @@ impl WalRecovery {
         );
 
         Ok(Some(WalRecoveredState {
-            active_mem_table: (
-                Rc::try_unwrap(active_mem_table.0).unwrap(),
-                active_mem_table.1,
-            ),
             ordered_immutable_mem_tables: mem_tables,
             id_generator,
         }))

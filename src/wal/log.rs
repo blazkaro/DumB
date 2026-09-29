@@ -1,6 +1,7 @@
 use crate::commands::request::CommandRequest;
 use crate::errors::retryable::RetryableError;
 use crate::retries::retry::{RetryPolicy, retry_if};
+use crate::safe_io::errors::SafeIoInitError;
 use crate::storage_config::StorageConfig;
 use crate::wal::errors::{WalError, WalReleaseError, WalRotationError};
 use crate::wal::id_generator::{OrderedWalId, WalId, WalIdGenerator};
@@ -47,8 +48,7 @@ impl Wal {
         cpu_shard_id: u32,
         mode: WalMode,
         dir: PathBuf,
-        id_generator: WalIdGenerator,
-        active_id: OrderedWalId,
+        mut id_generator: WalIdGenerator,
         storage_config: Rc<StorageConfig>,
         shares: Shares,
         latency: Latency,
@@ -66,6 +66,10 @@ impl Wal {
         let queue_name = format!("wal-{}", cpu_shard_id);
         let task_queue =
             glommio_ng::executor().create_task_queue(shares, latency, queue_name.as_str());
+
+        let active_id = id_generator
+            .next_id()
+            .expect("Couldn't generate WAL id during initialization");
 
         let active_wal_id = active_id.wal_id;
         glommio_ng::spawn_local_into(
@@ -172,11 +176,10 @@ impl Wal {
 
         let mode = Rc::new(mode);
 
-        let mut writer = match Self::open_wal(
+        let mut writer = match Self::next_wal(
             Rc::new(active_id),
             cpu_shard_id,
             &dir,
-            true,
             Rc::clone(&mode),
             Rc::clone(&storage_config),
         )
@@ -258,11 +261,10 @@ impl Wal {
                                     max_delay: Duration::from_millis(1000),
                                 },
                                 async || {
-                                    Self::open_wal(
+                                    Self::next_wal(
                                         Rc::clone(&next_id),
                                         cpu_shard_id,
                                         &dir,
-                                        false,
                                         Rc::clone(&mode),
                                         Rc::clone(&storage_config),
                                     )
@@ -316,24 +318,17 @@ impl Wal {
         Ok(())
     }
 
-    async fn open_wal(
+    async fn next_wal(
         id: Rc<OrderedWalId>,
         cpu_shard_id: u32,
         dir: &Path,
-        append: bool,
         mode: Rc<WalMode>,
         storage_config: Rc<StorageConfig>,
-    ) -> Result<WalWriter, WalError> {
+    ) -> Result<WalWriter, SafeIoInitError> {
         let path = dir.join(format!("WAL_{}_{}", cpu_shard_id, id.wal_id));
-        let writer = WalWriter::open(
-            &path,
-            id,
-            append,
-            Rc::clone(&mode),
-            Rc::clone(&storage_config),
-        )
-        .await
-        .map_err(WalError::WriterFailed)?;
+        let writer =
+            WalWriter::open_and_truncate(&path, id, Rc::clone(&mode), Rc::clone(&storage_config))
+                .await?;
 
         Ok(writer)
     }

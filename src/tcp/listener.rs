@@ -2,16 +2,17 @@ use crate::commands::request::CommandDecodingError;
 use crate::mem_table::mem_table::MemTable;
 use crate::shards::router::{CommandResult, ShardRouter};
 use crate::tcp::decoder::TcpCommandDecoder;
+use crate::tcp::response_codes::ResponseCode;
 use crate::tcp::sender::TcpCommandSender;
 use futures::io::WriteHalf;
-use futures::{AsyncReadExt, StreamExt};
+use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
 use glommio_ng::channels::local_channel::LocalReceiver;
 use glommio_ng::net::{Preallocated, TcpListener, TcpStream};
 use glommio_ng::{Latency, Shares, TaskQueueHandle};
 use std::rc::Rc;
 
 pub struct TcpCommandResult {
-    pub result: CommandResult,
+    pub result: Result<CommandResult, ResponseCode>,
     pub req_id: u16,
 }
 
@@ -104,13 +105,15 @@ impl Listener {
                         match router.dispatch(decoded.req).await {
                             Ok(cmd_result) => {
                                 let _ = response_tx.try_send(TcpCommandResult {
-                                    result: cmd_result,
+                                    result: Ok(cmd_result),
                                     req_id: decoded.req_id,
-                                });
-                                // TODO: handle send result error
+                                }); // caller may have gone
                             }
                             Err(e) => {
-                                // TODO: handle error
+                                let _ = response_tx.try_send(TcpCommandResult{
+                                    result: Err(ResponseCode::Error),
+                                    req_id: decoded.req_id,
+                                });
                             }
                         }
                     },
@@ -130,8 +133,9 @@ impl Listener {
     ) {
         let mut results = response_rx.stream();
         while let Some(result) = results.next().await {
-            if let Err(e) = TcpCommandSender::send(&mut write_half, result).await {
-                // TODO: probably connection dead, handle it
+            if let Err(_) = TcpCommandSender::send(&mut write_half, result).await {
+                // Most probably connection dead, client has gone away
+                let _ = write_half.close().await;
                 break;
             }
         }

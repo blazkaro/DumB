@@ -236,10 +236,17 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
             .map_err(GetError::ReadFailure)?;
 
         let result = async {
+            let mut entries_processed: u32 = 0;
             while !reader.is_eof() {
                 let entry = reader.next_entry().await.map_err(GetError::ReadFailure)?;
                 if entry.key == *key {
                     return Ok(Some(Rc::new(entry.value)));
+                }
+
+                entries_processed += 1;
+                if entries_processed % 64 == 0 {
+                    glommio_ng::executor().yield_if_needed().await;
+                    entries_processed = 0;
                 }
             }
             Ok(None)

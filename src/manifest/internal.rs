@@ -1,3 +1,4 @@
+use crate::le_reader::LeReader;
 use crate::manifest::entry::ManifestEntry;
 use crate::manifest::errors::{ManifestOpenError, ManifestWriteError};
 use crate::manifest::snapshot::ManifestSnapshot;
@@ -138,7 +139,9 @@ impl ManifestInternal {
         let mut level_size_bytes: HashMap<SsTableLevel, u64> = HashMap::new();
         let mut pos = 0usize;
 
-        while let Some((entry, consumed)) = ManifestEntry::decode(&result[pos..]) {
+        while let Some((buffer, consumed)) = Self::safe_read_at(&result[pos..])
+            && let Some((entry, _)) = ManifestEntry::decode(&buffer)
+        {
             match entry {
                 ManifestEntry::AddSsTable(metadata) => Self::memory_add_ss_table(
                     &mut by_id,
@@ -154,8 +157,12 @@ impl ManifestInternal {
                 ),
             }
 
-            pos += consumed as usize;
+            pos += consumed;
         }
+
+        // We don't know if manifest was corrupted so we stopped reading, or normal EOF happened.
+        // However, we don't need to truncate that manifest. We just maintain write_pos before that corrupted entry, so that future appends overwrite corrupted data.
+        // If that overwrite doesn't happen, we repeat the same processs (read till correct, and so on). There is no risk.
 
         Ok(Self {
             cpu_shard_id,
@@ -250,25 +257,62 @@ impl ManifestInternal {
     async fn safe_write_at(&mut self, buffer: Vec<u8>) -> Result<(), ManifestWriteError> {
         let pos = self.write_pos;
         let buffer_len = buffer.len();
-        let pre_write_file_size = self.write_pos;
+        let buffer_len_bytes = (buffer_len as u32).to_le_bytes();
+        let pre_write_pos = self.write_pos;
 
-        match self.file.write_at(buffer, pos).await {
+        let crc = crc32c::crc32c_append(0u32, &buffer_len_bytes);
+        let crc = crc32c::crc32c_append(crc, &buffer);
+
+        // capacity = len (4bytes) + crc size (4 bytes) + buffer len
+        let mut complete = Vec::with_capacity(size_of::<u32>() + size_of::<u32>() + buffer_len);
+        complete.extend_from_slice(&buffer_len_bytes);
+        complete.extend_from_slice(&crc.to_le_bytes());
+        complete.extend_from_slice(&buffer);
+
+        let complete_len = complete.len();
+
+        match self.file.write_at(complete, pos).await {
             Ok(bytes_written) => {
-                if buffer_len != bytes_written {
-                    self.file
-                        .truncate(pre_write_file_size)
-                        .await
-                        .expect("Could not recover manifest after incomplete write");
-                    // TODO: Without checksums, we can't really do anything clever
-
+                if bytes_written != complete_len {
+                    // TODO: short write may be part of normal flow, reconsider this piece of code. For now, it doesn't cause any problems except unnecessary retry
+                    // Don't advance write_pos, short write will be overwritten by future appends
                     Err(ManifestWriteError::IncompleteWrite)
                 } else {
-                    self.write_pos += buffer_len as u64;
+                    self.write_pos += bytes_written as u64;
                     Ok(())
                 }
             }
             Err(e) => Err(ManifestWriteError::WriteFailed(e.into())),
         }
+    }
+
+    /// Returns None if it is not safe to read manifest anymore
+    fn safe_read_at(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
+        if buffer.len() < 8 {
+            // If buffer size is lesser than len + crc size
+            return None;
+        }
+
+        let mut offset = 0usize;
+
+        let payload_len_bytes = &buffer[0..4];
+        offset += size_of::<u32>();
+        let payload_len = LeReader::read_u32_le(&payload_len_bytes, 0);
+
+        let crc = LeReader::read_u32_le(buffer, offset);
+        offset += size_of::<u32>();
+
+        let payload = buffer.get(offset..offset + payload_len as usize)?;
+        offset += payload_len as usize;
+
+        let expected_crc = crc32c::crc32c_append(0u32, payload_len_bytes);
+        let expected_crc = crc32c::crc32c_append(expected_crc, payload);
+
+        if crc != expected_crc {
+            return None;
+        }
+
+        Some((payload.to_vec(), offset))
     }
 
     fn memory_add_ss_table(

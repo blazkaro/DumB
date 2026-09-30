@@ -25,6 +25,7 @@ struct WaitingMemTable<MT: MemTable> {
 
 pub struct CommandHandler<MT: MemTable + 'static> {
     mem_table: RefCell<Rc<RefCell<MT>>>,
+    draining_mem_tables: RefCell<Vec<Rc<RefCell<MT>>>>, // rotated out, writers may still be finishing
     gate: RefCell<Option<glommio_ng::sync::Gate>>,
     mem_table_flusher: MemTableFlushHandler<MT>,
     storage_config: Rc<StorageConfig>,
@@ -47,6 +48,7 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
     ) -> Self {
         Self {
             mem_table: RefCell::new(Rc::new(RefCell::new(MT::new(Rc::clone(&storage_config))))),
+            draining_mem_tables: RefCell::new(Vec::new()),
             gate: RefCell::new(Some(glommio_ng::sync::Gate::new())),
             mem_table_flusher: flusher,
             storage_config: Rc::clone(&storage_config),
@@ -108,6 +110,8 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
                                 Rc::new(RefCell::new(MT::new(Rc::clone(&self.storage_config)))),
                             );
                             *self.gate.borrow_mut() = Some(glommio_ng::sync::Gate::new());
+                            // still readable while writers drain
+                            self.draining_mem_tables.borrow_mut().push(Rc::clone(&full));
 
                             // we don't need that clone anymore
                             // don't keep untracked Rc while draining
@@ -119,11 +123,16 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
                             // (or panicking without proper, lock-like handling)
                             prev_gate.close().await.ok();
 
+                            // remove the extra Rc BEFORE into_inner, and do the removal and the push with NO await between them
+                            self.draining_mem_tables
+                                .borrow_mut()
+                                .retain(|m| !Rc::ptr_eq(m, &full));
+
                             // Drained, no task is holding that old mem table right now, so we can convert into inner
                             let full = Rc::into_inner(full).expect("Mem table was still being processed by some task despite draining in flight commands");
                             let full = Rc::new(full.into_inner());
 
-                            self.immutable_mem_tables.push(Rc::clone(&full));
+                            self.immutable_mem_tables.push(Rc::clone(&full)); // the same sync block as retain (no window for invalid state for read operation)
                             self.mem_table_flusher
                                 .flush(full, prev_wal_id)
                                 .map_err(SetError::FlusherFailure)?;
@@ -171,6 +180,14 @@ impl<MT: MemTable + 'static> CommandHandler<MT> {
     pub async fn get(&self, key: &DbKey) -> Result<Option<Rc<DbValue>>, GetError> {
         if let Some(value) = self.mem_table.borrow().borrow().get(key) {
             return Ok(Some(value));
+        }
+
+        // check being drained (waiting for rotation) first
+        // reverse because newest mem tables are at the end of vec (we used .push())
+        for m in self.draining_mem_tables.borrow().iter().rev() {
+            if let Some(value) = m.borrow().get(key) {
+                return Ok(Some(value));
+            }
         }
 
         if let Some(value) = self.immutable_mem_tables.get(key) {
